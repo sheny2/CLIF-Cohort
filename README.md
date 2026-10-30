@@ -1,13 +1,13 @@
 # Hopkins CLIF adult pneumonia cohort
 
 This folder starts a cohort workflow for Hopkins EHR data stored in CLIF format.
-It adapts the MIMIC-IV cohort logic to the Hopkins multisite CLIF delivery.
+It adapts the MIMIC-IV cohort logic to the Hopkins multisite CLIF.
 
 
 ## Current cohort definition
 
 The extraction script constructs hospital blocks and retains one eligible block
-per patient using these rules:
+per patient using these rules (largely based on previous codes):
 
 1. Combine overlapping hospitalizations and consecutive hospitalizations whose gap is no more than six hours.
 2. Require valid admission/discharge timestamps, a patient identifier, and age at least 18 (but less than 120 years).
@@ -37,7 +37,7 @@ the builder can use a configured site column in `clif_hospitalization.parquet`
 or a constant fallback for an extract already separated by site.
 
 The glucocorticoid vocabulary check looks for any
-`clif_medication*.parquet` tables, especially:
+`clif_medication*.parquet` tables, for example they may be:
 
 - `clif_medication_admin_intermittent.parquet`
 - `clif_medication_admin_continuous.parquet`
@@ -93,18 +93,13 @@ export CLIF_SITE_ID=hopkins_unspecified
 Rscript 01_build_adult_pneumonia_cohort.R
 ```
 
-### Multisite behavior
+### Multisite 
 
-For a combined Hopkins extract, no artificial sites are created. By default,
-the script assigns each component encounter to its first ADT `hospital_id` and
-assigns a hospital block to the first component encounter's hospital. The
-crosswalk retains `component_site_id`, while the block-level output includes
-`component_site_ids` and `crosses_site_boundary`. This permits site-stratified
-summaries while keeping transfers within the same patient hospital block.
+By default, the script assigns each component encounter to its first ADT `hospital_id` and assigns a hospital block to the first component encounter's hospital. 
+The crosswalk retains `component_site_id`, while the block-level output includes component_site_ids` and `crosses_site_boundary`. 
+This permits site-stratified summaries while keeping transfers within the same patient hospital block.
 
-If the delivery is already split into separate directories, run the script once
-per directory with a distinct `CLIF_SITE_ID` and output directory. If the site
-is stored directly on hospitalization, set it explicitly, for example:
+If the data is already split into separate directories, run the script once per directory with a distinct `CLIF_SITE_ID` and output directory. If the site is stored directly on hospitalization, set it explicitly, for example:
 
 ```bash
 export CLIF_SITE_COLUMN=admission_hospital_id
