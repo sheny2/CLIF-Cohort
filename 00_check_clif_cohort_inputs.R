@@ -80,6 +80,70 @@ schema_rows <- rbindlist(lapply(names(requirements), function(filename) {
 }))
 fwrite(schema_rows, file.path(output_dir, "required_schema_check.csv"), na = "")
 
+# Multisite provenance is not part of the minimum cohort schema because some
+# CLIF deliveries are split into one directory per site. In a combined Hopkins
+# extract, prefer the admission hospital from the first ADT record. A site
+# column carried directly by hospitalization is also supported.
+hospitalization_path <- file.path(data_dir, "clif_hospitalization.parquet")
+hospitalization_columns <- if (file.exists(hospitalization_path)) {
+  open_dataset(hospitalization_path)$schema$names
+} else character()
+adt_path <- file.path(data_dir, "clif_adt.parquet")
+adt_columns <- if (file.exists(adt_path)) open_dataset(adt_path)$schema$names else
+  character()
+site_column_candidates <- c(
+  "admission_hospital_id", "admission_hospital_name", "hospital_id",
+  "hospital_name", "site_id"
+)
+site_check <- data.table(
+  source = c("clif_adt.parquet", "clif_hospitalization.parquet", "fallback"),
+  available = c(
+    file.exists(adt_path) && all(c("hospitalization_id", "hospital_id", "in_dttm") %in%
+                                  adt_columns),
+    any(site_column_candidates %in% hospitalization_columns),
+    nzchar(Sys.getenv("CLIF_SITE_ID", unset = ""))
+  ),
+  selected_or_available_field = c(
+    if ("hospital_id" %in% adt_columns) "hospital_id (first ADT location)" else "",
+    paste(intersect(site_column_candidates, hospitalization_columns), collapse = ";"),
+    Sys.getenv("CLIF_SITE_ID", unset = "")
+  ),
+  note = c(
+    "Preferred for a combined multisite Hopkins extract",
+    "Used when CLIF_SITE_COLUMN names one of these fields",
+    "Use only for a directory already separated to one site"
+  )
+)
+fwrite(site_check, file.path(output_dir, "site_provenance_check.csv"), na = "")
+
+optional_medication_files <- c(
+  "clif_medication_admin_intermittent.parquet",
+  "clif_medication_admin_continuous.parquet"
+)
+medication_check <- rbindlist(lapply(optional_medication_files, function(filename) {
+  path <- file.path(data_dir, filename)
+  available <- if (file.exists(path)) open_dataset(path)$schema$names else character()
+  data.table(
+    file = filename,
+    exists = file.exists(path),
+    has_hospitalization_id = "hospitalization_id" %in% available,
+    medication_text_fields = paste(
+      intersect(c("med_category", "med_name", "medication_name"), available),
+      collapse = ";"
+    ),
+    administration_time_fields = paste(
+      intersect(c("admin_dttm", "recorded_dttm", "start_dttm"), available),
+      collapse = ";"
+    ),
+    route_fields = paste(
+      intersect(c("med_route_category", "med_route_name"), available),
+      collapse = ";"
+    )
+  )
+}), fill = TRUE)
+fwrite(medication_check,
+       file.path(output_dir, "optional_medication_table_check.csv"), na = "")
+
 sample_column <- function(filename, columns, n = 100000L) {
   path <- file.path(data_dir, filename)
   if (!file.exists(path)) return(data.table())

@@ -1,40 +1,25 @@
 # Hopkins CLIF adult pneumonia cohort
 
-This folder starts a site-native cohort workflow for Hopkins EHR data stored in
-CLIF format. It adapts the validated MIMIC-in-CLIF cohort logic, but it does not
-use a MIMIC path, construct pseudo-sites, or assume shifted MIMIC dates.
+This folder starts a cohort workflow for Hopkins EHR data stored in CLIF format.
+It adapts the MIMIC-IV cohort logic to the Hopkins multisite CLIF delivery.
+
 
 ## Current cohort definition
 
 The extraction script constructs hospital blocks and retains one eligible block
 per patient using these rules:
 
-1. Combine overlapping hospitalizations and consecutive hospitalizations whose
-   gap is no more than six hours.
-2. Require valid admission/discharge timestamps, a patient identifier, and age
-   at least 18 but less than 120 years.
-3. Require the first component encounter to have
-   `admission_type_category == "ed"`.
-4. Apply the expanded pneumonia coding definition: principal pneumonia, or
-   secondary pneumonia with principal sepsis or respiratory failure in the
-   same component hospitalization.
-5. Require at least 24 continuous hours of IMV, NIPPV, or HFNC at least
-   30 L/min, beginning within seven days of block admission.
-6. Define time zero as the beginning of the first qualifying respiratory-
-   support episode.
-7. During the first 24 hours after time zero, require FiO2 documentation,
-   exclude tracheostomy, and require an eligible P/F or S/F measurement paired
-   to FiO2 within four hours. S/F requires SpO2 80--97%; P/F requires PaO2
-   40--700 and excludes ratios of 600 or greater.
-8. Exclude DNI-equivalent code status (`and`, `dnr/dni`, or `dnar/dni` after
-   normalization) recorded from seven days before through 24 hours after time
-   zero.
-9. Randomly select one eligible block per patient using a fixed seed.
+1. Combine overlapping hospitalizations and consecutive hospitalizations whose gap is no more than six hours.
+2. Require valid admission/discharge timestamps, a patient identifier, and age at least 18 (but less than 120 years).
+3. Require the first component encounter to have `admission_type_category == "ed"`.
+4. Apply the pneumonia coding definition: principal pneumonia, or secondary pneumonia with principal sepsis or respiratory failure in the same component hospitalization.
+5. Require at least 24 continuous hours of IMV, NIPPV, or HFNC at least 30 L/min, beginning within seven days of block admission.
+6. Define time zero as the beginning of the first qualifying respiratory-support episode.
+7. During the first 24 hours after time zero, require FiO2 documentation, exclude tracheostomy, and require an eligible P/F or S/F measurement paired to FiO2 within four hours. S/F requires SpO2 80--97%; P/F requires PaO2 40--700 and excludes ratios of 600 or greater.
+8. Exclude DNI-equivalent code status (`and`, `dnr/dni`, or `dnar/dni` after normalization) recorded from seven days before through 24 hours after time zero.
+9. Randomly select one eligible block per patient.
 
-The initial script intentionally matches the previous primary cohort. It does
-not yet impose a calendar restriction, a septic-shock exclusion, an S/F <=315
-severity threshold, or a treatment definition. Those decisions should be made
-and documented before the treatment/outcome analysis is added.
+
 
 ## Required CLIF files
 
@@ -44,6 +29,18 @@ and documented before the treatment/outcome analysis is added.
 - `clif_vitals.parquet`
 - `clif_labs.parquet`
 - `clif_code_status.parquet`
+
+For multisite attribution, `clif_adt.parquet` is strongly recommended. The
+builder uses the `hospital_id` on the first chronological ADT record for each
+component encounter, matching the collaborator example. If ADT is unavailable,
+the builder can use a configured site column in `clif_hospitalization.parquet`
+or a constant fallback for an extract already separated by site.
+
+The glucocorticoid vocabulary check looks for any
+`clif_medication*.parquet` tables, especially:
+
+- `clif_medication_admin_intermittent.parquet`
+- `clif_medication_admin_continuous.parquet`
 
 ## 1. Validate the Hopkins CLIF extract
 
@@ -58,6 +55,8 @@ Review:
 - `input_check/required_schema_check.csv`
 - `input_check/sampled_category_values.csv`
 - `input_check/category_compatibility_check.csv`
+- `input_check/site_provenance_check.csv`
+- `input_check/optional_medication_table_check.csv`
 
 The category report is important because CLIF column names can conform while
 site-specific category values still differ.
@@ -71,7 +70,7 @@ Rscript 01_build_adult_pneumonia_cohort.R \
   expanded \
   6 \
   32284 \
-  hopkins
+  hopkins_unspecified
 ```
 
 The arguments are:
@@ -81,15 +80,60 @@ The arguments are:
 3. Pneumonia definition: `expanded`, `principal`, or `any`
 4. Hospital-block gap in hours
 5. One-block-per-patient random-selection seed
-6. Real source-site identifier (or set `CLIF_SITE_ID`)
+6. Fallback site identifier (or set `CLIF_SITE_ID`); use only when ADT/site
+   provenance is missing or the input directory already represents one site
+7. Optional site column in `clif_hospitalization.parquet` (or set
+   `CLIF_SITE_COLUMN`); an explicit value overrides ADT-derived attribution
 
 The same run can be configured with environment variables:
 
 ```bash
 export CLIF_DATA_DIR=/path/to/hopkins/clif
-export CLIF_SITE_ID=hopkins
+export CLIF_SITE_ID=hopkins_unspecified
 Rscript 01_build_adult_pneumonia_cohort.R
 ```
+
+### Multisite behavior
+
+For a combined Hopkins extract, no artificial sites are created. By default,
+the script assigns each component encounter to its first ADT `hospital_id` and
+assigns a hospital block to the first component encounter's hospital. The
+crosswalk retains `component_site_id`, while the block-level output includes
+`component_site_ids` and `crosses_site_boundary`. This permits site-stratified
+summaries while keeping transfers within the same patient hospital block.
+
+If the delivery is already split into separate directories, run the script once
+per directory with a distinct `CLIF_SITE_ID` and output directory. If the site
+is stored directly on hospitalization, set it explicitly, for example:
+
+```bash
+export CLIF_SITE_COLUMN=admission_hospital_id
+Rscript 01_build_adult_pneumonia_cohort.R /path/to/hopkins/clif ./output
+```
+
+## 3. Locate glucocorticoid information
+
+Run the discovery script before defining treatment:
+
+```bash
+Rscript 02_profile_glucocorticoid_sources.R \
+  /path/to/hopkins/clif \
+  ./glucocorticoid_source_check
+```
+
+Review:
+
+- `glucocorticoid_source_check/medication_table_inventory.csv`
+- `glucocorticoid_source_check/glucocorticoid_candidate_values.csv`
+- `glucocorticoid_source_check/glucocorticoid_candidate_routes.csv`
+- `glucocorticoid_source_check/glucocorticoid_search_dictionary.csv`
+
+This step deliberately searches both medication category and medication name
+fields and distinguishes provisional systemic, inhaled, and route-dependent
+candidates. It does **not** yet classify treatment. Before extracting exposure,
+confirm with the CLIF data team which table represents administrations, which
+MAR actions count as administered doses, which routes are systemic, how dose
+equivalents will be handled, and which timestamp anchors the grace period.
 
 ## Principal outputs
 
@@ -105,10 +149,9 @@ Rscript 01_build_adult_pneumonia_cohort.R
 - `adult_pneumonia_cohort_design.csv`
 - `pneumonia_icd_definition.csv`
 
-Every cohort and crosswalk row carries `source_site_id`. No pseudo-site is
-created at this stage.
 
-## Packages
+
+## Packages (if needed)
 
 ```r
 install.packages(c("arrow", "data.table", "dplyr"))

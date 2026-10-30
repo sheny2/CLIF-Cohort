@@ -21,7 +21,7 @@
 # Usage:
 #   Rscript 01_build_adult_pneumonia_cohort.R \
 #     CLIF_DATA_DIR [OUTPUT_DIR] [CASE_DEFINITION] [BLOCK_GAP_HOURS] [SEED] \
-#     [SITE_ID]
+#     [FALLBACK_SITE_ID] [HOSPITALIZATION_SITE_COLUMN]
 #
 # CASE_DEFINITION: expanded (default), principal, or any.
 
@@ -92,15 +92,19 @@ if (!is.finite(block_gap_hours) || block_gap_hours < 0) {
 }
 if (!is.finite(selection_seed)) stop("SEED must be a finite integer.", call. = FALSE)
 
-source_site_id <- if (length(args) >= 6L && nzchar(args[6L])) {
+fallback_site_id <- if (length(args) >= 6L && nzchar(args[6L])) {
   args[6L]
 } else {
-  Sys.getenv("CLIF_SITE_ID", unset = "hopkins")
+  Sys.getenv("CLIF_SITE_ID", unset = "hopkins_unspecified")
 }
-source_site_id <- trimws(as.character(source_site_id))
-if (!nzchar(source_site_id)) {
-  stop("SITE_ID/CLIF_SITE_ID must be nonempty.", call. = FALSE)
+fallback_site_id <- trimws(as.character(fallback_site_id))
+if (!nzchar(fallback_site_id)) {
+  stop("FALLBACK_SITE_ID/CLIF_SITE_ID must be nonempty.", call. = FALSE)
 }
+requested_site_column <- if (length(args) >= 7L && nzchar(args[7L])) {
+  args[7L]
+} else Sys.getenv("CLIF_SITE_COLUMN", unset = "")
+requested_site_column <- trimws(as.character(requested_site_column))
 
 age_min <- 18
 age_max_exclusive <- 120
@@ -141,7 +145,13 @@ message("Hospital-block gap: ", block_gap_hours, " hours")
 message("Respiratory support: >=", support_duration_hours,
         " continuous hours starting within ", support_start_days, " days")
 message("One-block-per-patient selection seed: ", selection_seed)
-message("Source CLIF site ID: ", source_site_id)
+message("Fallback CLIF site ID: ", fallback_site_id)
+if (nzchar(requested_site_column)) {
+  message("Requested hospitalization site column: ", requested_site_column)
+} else {
+  message("Site assignment: first ADT hospital when available; otherwise an ",
+          "available hospitalization site field; otherwise fallback site ID")
+}
 
 # ---- Utilities ---------------------------------------------------------------
 
@@ -305,6 +315,79 @@ hospitalization <- hospitalization[
   by = hospitalization_id
 ]
 
+# Assign the real hospital/site associated with each component encounter. For
+# a combined multisite Hopkins extract, this follows the collaborator example:
+# the first nonmissing ADT hospital ordered by in_dttm. An explicitly requested
+# hospitalization column takes precedence. The constant fallback is intended
+# only for site-separated deliveries or records lacking hospital provenance.
+site_assignment_source <- "fallback_site_id"
+site_source_column <- ""
+hospitalization_site_candidates <- c(
+  "admission_hospital_id", "admission_hospital_name", "hospital_id",
+  "hospital_name", "site_id"
+)
+
+if (nzchar(requested_site_column)) {
+  if (!requested_site_column %in% names(hospitalization)) {
+    stop("Requested CLIF_SITE_COLUMN is absent from clif_hospitalization: ",
+         requested_site_column, call. = FALSE)
+  }
+  hospitalization[, source_site_id := as.character(get(requested_site_column))]
+  site_assignment_source <- "hospitalization_column"
+  site_source_column <- requested_site_column
+} else {
+  adt_path <- file.path(data_dir, "clif_adt.parquet")
+  adt_columns <- if (file.exists(adt_path)) open_dataset(adt_path)$schema$names else
+    character()
+  if (file.exists(adt_path) &&
+      all(c("hospitalization_id", "hospital_id", "in_dttm") %in% adt_columns)) {
+    message("Deriving encounter site from the first ADT hospital_id...")
+    adt_site <- open_dataset(adt_path) |>
+      select(hospitalization_id, hospital_id, in_dttm) |>
+      filter(!is.na(hospital_id)) |>
+      collect() |>
+      as.data.table()
+    adt_site[, `:=`(
+      hospitalization_id = as.character(hospitalization_id),
+      hospital_id = as.character(hospital_id),
+      in_dttm = as.POSIXct(in_dttm, tz = "UTC")
+    )]
+    setorder(adt_site, hospitalization_id, in_dttm, na.last = TRUE)
+    adt_site <- adt_site[
+      !is.na(hospital_id) & nzchar(trimws(hospital_id)),
+      .(source_site_id = first_nonmissing(hospital_id)),
+      by = hospitalization_id
+    ]
+    hospitalization <- merge(
+      hospitalization, adt_site, by = "hospitalization_id", all.x = TRUE,
+      sort = FALSE
+    )
+    site_assignment_source <- "first_adt_hospital"
+    site_source_column <- "clif_adt.hospital_id"
+  } else {
+    detected_site_column <- intersect(
+      hospitalization_site_candidates, names(hospitalization)
+    )
+    if (length(detected_site_column)) {
+      detected_site_column <- detected_site_column[1L]
+      hospitalization[, source_site_id := as.character(get(detected_site_column))]
+      site_assignment_source <- "auto_detected_hospitalization_column"
+      site_source_column <- detected_site_column
+    } else {
+      hospitalization[, source_site_id := NA_character_]
+    }
+  }
+}
+hospitalization[
+  is.na(source_site_id) | !nzchar(trimws(source_site_id)),
+  source_site_id := fallback_site_id
+]
+hospitalization[, source_site_id := trimws(as.character(source_site_id))]
+message("Site assignment source: ", site_assignment_source,
+        if (nzchar(site_source_column)) paste0(" (", site_source_column, ")") else "")
+message("Observed component-encounter sites: ",
+        uniqueN(hospitalization$source_site_id, na.rm = TRUE))
+
 # ---- Construct hospital blocks ----------------------------------------------
 
 valid_hospitalizations <- hospitalization[
@@ -331,14 +414,21 @@ valid_hospitalizations[, component_order := seq_len(.N),
 hospital_block_crosswalk_all <- valid_hospitalizations[, .(
   patient_id, hospital_block_id, hospital_block_number, hospitalization_id,
   component_order,
+  source_site_id = as.character(source_site_id),
+  component_site_id = as.character(source_site_id),
   hospitalization_admission_dttm = admission_dttm,
   hospitalization_discharge_dttm = discharge_dttm,
   gap_hours_from_running_block_end
 )]
-hospital_block_crosswalk_all[, source_site_id := source_site_id]
 
 hospital_blocks <- valid_hospitalizations[, .(
   index_hospitalization_id = hospitalization_id[1L],
+  source_site_id = as.character(first_nonmissing(source_site_id)),
+  component_site_ids = paste(unique(source_site_id[!is.na(source_site_id) &
+                                                      nzchar(source_site_id)]),
+                             collapse = ";"),
+  crosses_site_boundary = as.integer(uniqueN(source_site_id[!is.na(source_site_id) &
+                                                              nzchar(source_site_id)]) > 1L),
   admission_dttm = min(admission_dttm),
   discharge_dttm = max(discharge_dttm),
   age_at_admission = suppressWarnings(as.numeric(first_nonmissing(age_at_admission))),
@@ -355,7 +445,6 @@ hospital_blocks <- valid_hospitalizations[, .(
       gap_hours_from_running_block_end <= block_gap_hours
   ))
 ), by = .(patient_id, hospital_block_id, hospital_block_number)]
-hospital_blocks[, source_site_id := source_site_id]
 hospital_blocks[, admission_type_category_clean := normalize_category(
   admission_type_category
 )]
@@ -817,7 +906,9 @@ for (i in 2:nrow(attrition)) {
 
 design_summary <- data.table(
   parameter = c(
-    "source_site_id", "cohort_unit", "hospital_block_gap_hours",
+    "site_assignment_source", "site_source_column", "fallback_site_id",
+    "observed_component_site_count", "observed_component_site_ids",
+    "cohort_unit", "hospital_block_gap_hours",
     "running_block_end_algorithm",
     "age_minimum", "age_maximum_exclusive", "admission_type_category",
     "pneumonia_case_definition", "support_devices", "hfnc_min_lpm",
@@ -829,7 +920,10 @@ design_summary <- data.table(
     "eligible_blocks_before_patient_selection", "final_blocks", "final_patients"
   ),
   value = as.character(c(
-    source_site_id, "hospital_block", block_gap_hours, TRUE,
+    site_assignment_source, site_source_column, fallback_site_id,
+    uniqueN(hospitalization$source_site_id, na.rm = TRUE),
+    paste(sort(unique(hospitalization$source_site_id)), collapse = ";"),
+    "hospital_block", block_gap_hours, TRUE,
     age_min, age_max_exclusive, "ed",
     case_definition, "imv;nippv;high_flow_nc", hfnc_min_lpm,
     support_duration_hours, support_start_days, oxygenation_window_hours,
