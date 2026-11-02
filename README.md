@@ -104,6 +104,9 @@ By default, the script assigns each component encounter to its first ADT `hospit
 The crosswalk retains `component_site_id`, while the block-level output includes
 `component_site_ids` and `crosses_site_boundary`.
 This permits site-stratified summaries while keeping transfers within the same patient hospital block.
+Because `clif_adt` can be very large, the script waits until clinical
+eligibility is known and queries ADT only for component hospitalizations in
+eligible blocks. Hospital attribution does not affect cohort eligibility.
 
 If the data is already split into separate directories, run the script once per directory with a distinct `CLIF_SITE_ID` and output directory. If the site is stored directly on hospitalization, set it explicitly, for example:
 
@@ -178,3 +181,11 @@ rules as pending.
 ```r
 install.packages(c("arrow", "data.table", "dplyr"))
 ```
+
+## Native-memory errors
+
+If R exits with a libc message such as `corrupted size vs. prev_size`, record
+the last progress message and run `sessionInfo()` in a fresh R session. This is
+a native Arrow/data.table failure rather than a catchable R condition. The
+current cohort builder avoids collecting the full ADT table and selects only
+needed hospitalization/diagnosis columns to reduce that risk.

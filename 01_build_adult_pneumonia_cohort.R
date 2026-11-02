@@ -265,8 +265,27 @@ read_filtered_clif <- function(path, id_column, ids, columns) {
 # ---- Read source tables ------------------------------------------------------
 
 message("Reading required CLIF tables...")
-hospitalization <- as.data.table(read_parquet(paths[["hospitalization"]]))
-diagnosis <- as.data.table(read_parquet(paths[["diagnosis"]]))
+hospitalization_schema <- open_dataset(paths[["hospitalization"]])$schema$names
+hospitalization_read_columns <- unique(c(
+  "hospitalization_id", "patient_id", "admission_dttm", "discharge_dttm",
+  "age_at_admission", "admission_type_category", "discharge_category",
+  requested_site_column,
+  intersect(c("admission_hospital_id", "admission_hospital_name", "hospital_id",
+              "hospital_name", "site_id"), hospitalization_schema)
+))
+hospitalization_read_columns <- intersect(
+  hospitalization_read_columns[nzchar(hospitalization_read_columns)],
+  hospitalization_schema
+)
+hospitalization <- open_dataset(paths[["hospitalization"]]) |>
+  select(all_of(hospitalization_read_columns)) |>
+  collect() |>
+  as.data.table()
+diagnosis <- open_dataset(paths[["diagnosis"]]) |>
+  select(hospitalization_id, diagnosis_code, diagnosis_code_format,
+         diagnosis_primary) |>
+  collect() |>
+  as.data.table()
 
 check_columns(hospitalization, c(
   "hospitalization_id", "patient_id", "admission_dttm", "discharge_dttm",
@@ -322,6 +341,7 @@ hospitalization <- hospitalization[
 # only for site-separated deliveries or records lacking hospital provenance.
 site_assignment_source <- "fallback_site_id"
 site_source_column <- ""
+deferred_adt_site_assignment <- FALSE
 hospitalization_site_candidates <- c(
   "admission_hospital_id", "admission_hospital_name", "hospital_id",
   "hospital_name", "site_id"
@@ -341,28 +361,13 @@ if (nzchar(requested_site_column)) {
     character()
   if (file.exists(adt_path) &&
       all(c("hospitalization_id", "hospital_id", "in_dttm") %in% adt_columns)) {
-    message("Deriving encounter site from the first ADT hospital_id...")
-    adt_site <- open_dataset(adt_path) |>
-      select(hospitalization_id, hospital_id, in_dttm) |>
-      filter(!is.na(hospital_id)) |>
-      collect() |>
-      as.data.table()
-    adt_site[, `:=`(
-      hospitalization_id = as.character(hospitalization_id),
-      hospital_id = as.character(hospital_id),
-      in_dttm = as.POSIXct(in_dttm, tz = "UTC")
-    )]
-    setorder(adt_site, hospitalization_id, in_dttm, na.last = TRUE)
-    adt_site <- adt_site[
-      !is.na(hospital_id) & nzchar(trimws(hospital_id)),
-      .(source_site_id = first_nonmissing(hospital_id)),
-      by = hospitalization_id
-    ]
-    hospitalization <- merge(
-      hospitalization, adt_site, by = "hospitalization_id", all.x = TRUE,
-      sort = FALSE
-    )
-    site_assignment_source <- "first_adt_hospital"
+    # clif_adt can be much larger than all other cohort tables combined. Do not
+    # collect it here. Hospital attribution is not an eligibility criterion, so
+    # defer the ADT query until eligible blocks are known and then read ADT rows
+    # only for those component hospitalization IDs.
+    hospitalization[, source_site_id := NA_character_]
+    deferred_adt_site_assignment <- TRUE
+    site_assignment_source <- "first_adt_hospital_deferred_to_eligible_blocks"
     site_source_column <- "clif_adt.hospital_id"
   } else {
     detected_site_column <- intersect(
@@ -378,15 +383,21 @@ if (nzchar(requested_site_column)) {
     }
   }
 }
-hospitalization[
-  is.na(source_site_id) | !nzchar(trimws(source_site_id)),
-  source_site_id := fallback_site_id
-]
+if (!deferred_adt_site_assignment) {
+  hospitalization[
+    is.na(source_site_id) | !nzchar(trimws(source_site_id)),
+    source_site_id := fallback_site_id
+  ]
+}
 hospitalization[, source_site_id := trimws(as.character(source_site_id))]
 message("Site assignment source: ", site_assignment_source,
         if (nzchar(site_source_column)) paste0(" (", site_source_column, ")") else "")
-message("Observed component-encounter sites: ",
-        uniqueN(hospitalization$source_site_id, na.rm = TRUE))
+if (deferred_adt_site_assignment) {
+  message("ADT site query deferred until eligible hospital blocks are known.")
+} else {
+  message("Observed component-encounter sites: ",
+          uniqueN(hospitalization$source_site_id, na.rm = TRUE))
+}
 
 # ---- Construct hospital blocks ----------------------------------------------
 
@@ -815,6 +826,80 @@ eligible_blocks <- merge(
   respiratory_eligibility[respiratory_eligible == 1L],
   by = "hospital_block_id", all = FALSE, sort = FALSE
 )
+
+# Add real hospital attribution only after eligibility is known. This avoids
+# materializing the full five-hospital ADT table, which can exhaust memory or
+# abort inside Arrow before R can raise a catchable error.
+if (deferred_adt_site_assignment && nrow(eligible_blocks)) {
+  eligible_block_ids <- unique(eligible_blocks$hospital_block_id)
+  eligible_hospitalization_ids <- unique(hospital_block_crosswalk_all[
+    hospital_block_id %in% eligible_block_ids, hospitalization_id
+  ])
+  message("Reading ADT hospital_id for ",
+          length(eligible_hospitalization_ids),
+          " hospitalization(s) in eligible blocks...")
+  adt_site <- open_dataset(file.path(data_dir, "clif_adt.parquet")) |>
+    filter(.data$hospitalization_id %in% eligible_hospitalization_ids) |>
+    select(hospitalization_id, hospital_id, in_dttm) |>
+    filter(!is.na(.data$hospital_id)) |>
+    collect() |>
+    as.data.table()
+  adt_site[, `:=`(
+    hospitalization_id = as.character(hospitalization_id),
+    hospital_id = trimws(as.character(hospital_id)),
+    in_dttm = as.POSIXct(in_dttm, tz = "UTC")
+  )]
+  setorder(adt_site, hospitalization_id, in_dttm, na.last = TRUE)
+  adt_site <- adt_site[
+    !is.na(hospital_id) & nzchar(hospital_id),
+    .(adt_source_site_id = first_nonmissing(hospital_id)),
+    by = hospitalization_id
+  ]
+
+  eligible_crosswalk_index <- which(
+    hospital_block_crosswalk_all$hospital_block_id %in% eligible_block_ids
+  )
+  site_match <- match(
+    hospital_block_crosswalk_all$hospitalization_id[eligible_crosswalk_index],
+    adt_site$hospitalization_id
+  )
+  resolved_site <- adt_site$adt_source_site_id[site_match]
+  resolved_site[
+    is.na(resolved_site) | !nzchar(trimws(resolved_site))
+  ] <- fallback_site_id
+  hospital_block_crosswalk_all[eligible_crosswalk_index, `:=`(
+    source_site_id = resolved_site,
+    component_site_id = resolved_site
+  )]
+
+  eligible_site_by_block <- hospital_block_crosswalk_all[
+    hospital_block_id %in% eligible_block_ids
+  ][order(component_order), .(
+    source_site_id = as.character(first_nonmissing(component_site_id)),
+    component_site_ids = paste(unique(component_site_id[
+      !is.na(component_site_id) & nzchar(component_site_id)
+    ]), collapse = ";"),
+    crosses_site_boundary = as.integer(uniqueN(component_site_id[
+      !is.na(component_site_id) & nzchar(component_site_id)
+    ]) > 1L)
+  ), by = hospital_block_id]
+
+  hospital_blocks[eligible_site_by_block, on = "hospital_block_id", `:=`(
+    source_site_id = i.source_site_id,
+    component_site_ids = i.component_site_ids,
+    crosses_site_boundary = i.crosses_site_boundary
+  )]
+  eligible_blocks[eligible_site_by_block, on = "hospital_block_id", `:=`(
+    source_site_id = i.source_site_id,
+    component_site_ids = i.component_site_ids,
+    crosses_site_boundary = i.crosses_site_boundary
+  )]
+  message("Observed eligible-block sites: ",
+          uniqueN(eligible_site_by_block$source_site_id, na.rm = TRUE))
+  rm(adt_site)
+  invisible(gc(verbose = FALSE))
+}
+
 eligible_blocks[, eligible_blocks_for_patient := .N, by = patient_id]
 setorder(eligible_blocks, patient_id, admission_dttm, hospital_block_id)
 set.seed(selection_seed)
@@ -921,8 +1006,10 @@ design_summary <- data.table(
   ),
   value = as.character(c(
     site_assignment_source, site_source_column, fallback_site_id,
-    uniqueN(hospitalization$source_site_id, na.rm = TRUE),
-    paste(sort(unique(hospitalization$source_site_id)), collapse = ";"),
+    uniqueN(selected_crosswalk$component_site_id, na.rm = TRUE),
+    paste(sort(unique(selected_crosswalk$component_site_id[
+      !is.na(selected_crosswalk$component_site_id)
+    ])), collapse = ";"),
     "hospital_block", block_gap_hours, TRUE,
     age_min, age_max_exclusive, "ed",
     case_definition, "imv;nippv;high_flow_nc", hfnc_min_lpm,
