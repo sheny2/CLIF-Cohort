@@ -128,9 +128,13 @@ medication_check <- rbindlist(lapply(optional_medication_files, function(filenam
     exists = file.exists(path),
     has_hospitalization_id = "hospitalization_id" %in% available,
     medication_text_fields = paste(
-      intersect(c("med_category", "med_name", "medication_name"), available),
+      intersect(c("med_group", "med_category", "med_name", "medication_name"),
+                available),
       collapse = ";"
     ),
+    has_confirmed_steroid_group_field = "med_group" %in% available,
+    has_confirmed_administration_time = "admin_dttm" %in% available,
+    has_confirmed_route_field = "med_route_category" %in% available,
     administration_time_fields = paste(
       intersect(c("admin_dttm", "recorded_dttm", "start_dttm"), available),
       collapse = ";"

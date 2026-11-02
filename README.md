@@ -36,11 +36,16 @@ component encounter, matching the collaborator example. If ADT is unavailable,
 the builder can use a configured site column in `clif_hospitalization.parquet`
 or a constant fallback for an extract already separated by site.
 
-The glucocorticoid vocabulary check looks for any
-`clif_medication*.parquet` tables, for example they may be:
+The Hopkins team confirmed that steroid administrations are stored in
+`clif_medication_admin_intermittent.parquet`, with:
 
-- `clif_medication_admin_intermittent.parquet`
-- `clif_medication_admin_continuous.parquet`
+- `med_group == "steroid"`
+- administration time in `admin_dttm`
+- candidate systemic routes defined by
+  `med_route_category %in% c("enteral", "iv")`
+
+The minimum qualifying dose and any glucocorticoid dose-equivalence rules are
+still pending clinical specification.
 
 ## 1. Validate the Hopkins CLIF extract
 
@@ -96,7 +101,8 @@ Rscript 01_build_adult_pneumonia_cohort.R
 ### Multisite 
 
 By default, the script assigns each component encounter to its first ADT `hospital_id` and assigns a hospital block to the first component encounter's hospital. 
-The crosswalk retains `component_site_id`, while the block-level output includes component_site_ids` and `crosses_site_boundary`. 
+The crosswalk retains `component_site_id`, while the block-level output includes
+`component_site_ids` and `crosses_site_boundary`.
 This permits site-stratified summaries while keeping transfers within the same patient hospital block.
 
 If the data is already split into separate directories, run the script once per directory with a distinct `CLIF_SITE_ID` and output directory. If the site is stored directly on hospitalization, set it explicitly, for example:
@@ -123,12 +129,33 @@ Review:
 - `glucocorticoid_source_check/glucocorticoid_candidate_routes.csv`
 - `glucocorticoid_source_check/glucocorticoid_search_dictionary.csv`
 
-This step deliberately searches both medication category and medication name
-fields and distinguishes provisional systemic, inhaled, and route-dependent
-candidates. It does **not** yet classify treatment. Before extracting exposure,
-confirm with the CLIF data team which table represents administrations, which
-MAR actions count as administered doses, which routes are systemic, how dose
-equivalents will be handled, and which timestamp anchors the grace period.
+This step verifies the confirmed `med_group`, administration-time, and route
+fields while also profiling medication names and categories. It does **not** yet
+classify treatment because the qualifying dose threshold and dose-equivalence
+rules have not been finalized.
+
+## 4. Extract candidate steroid administrations
+
+After building the cohort, extract route-eligible steroid administrations:
+
+```bash
+Rscript 03_extract_candidate_steroid_administrations.R \
+  /path/to/hopkins/clif \
+  ./output \
+  ./steroid_candidates
+```
+
+This links medication administrations to the selected cohort through component
+hospitalization IDs and computes `hours_from_time_zero` when the cohort contains
+`respiratory_failure_start`. It writes:
+
+- `candidate_steroid_administrations_in_final_cohort.parquet`
+- `candidate_steroid_attrition.csv`
+- `candidate_steroid_definition.csv`
+
+These are candidate administrations, not the final treatment indicator. The
+definition file explicitly records the dose threshold and dose-equivalence
+rules as pending.
 
 ## Principal outputs
 

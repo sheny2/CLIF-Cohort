@@ -1,9 +1,10 @@
 #!/usr/bin/env Rscript
 
-# Discover where glucocorticoid administrations are represented in a CLIF
-# delivery. This is an auditable vocabulary/profile step, not yet a treatment
-# definition. It exports aggregate medication values and routes only; it does
-# not export patient- or encounter-level rows.
+# Confirm and profile glucocorticoid administrations in a CLIF delivery. The
+# Hopkins definition supplied by the clinical team is intermittent medication
+# administration with med_group == "steroid" and an enteral or IV route. This
+# remains a candidate exposure definition until the minimum dose and any dose-
+# equivalence rules are supplied. Aggregate values and routes only are exported.
 #
 # Usage:
 #   Rscript 02_profile_glucocorticoid_sources.R CLIF_DATA_DIR [OUTPUT_DIR]
@@ -61,7 +62,7 @@ fwrite(dictionary,
        file.path(output_dir, "glucocorticoid_search_dictionary.csv"), na = "")
 
 text_candidates <- c(
-  "med_category", "med_name", "medication_name", "generic_name",
+  "med_group", "med_category", "med_name", "medication_name", "generic_name",
   "ingredient", "order_name"
 )
 time_candidates <- c(
@@ -205,12 +206,37 @@ fwrite(candidate_values,
 fwrite(candidate_routes,
        file.path(output_dir, "glucocorticoid_candidate_routes.csv"), na = "")
 
+confirmed_source_check <- data.table(
+  rule = c(
+    "source_table", "medication_group", "administration_time",
+    "eligible_routes", "dose_threshold"
+  ),
+  specified_value = c(
+    "clif_medication_admin_intermittent.parquet", "med_group == steroid",
+    "admin_dttm", "med_route_category in {enteral, iv}",
+    "PENDING CLINICAL SPECIFICATION"
+  ),
+  available_or_confirmed = c(
+    "clif_medication_admin_intermittent" %in% inventory$source_table,
+    any(candidate_values$source_table == "clif_medication_admin_intermittent" &
+          candidate_values$source_field == "med_group" &
+          tolower(trimws(candidate_values$source_value)) == "steroid"),
+    any(inventory$source_table == "clif_medication_admin_intermittent" &
+          grepl("(^|;)admin_dttm($|;)", inventory$administration_time_fields)),
+    any(inventory$source_table == "clif_medication_admin_intermittent" &
+          grepl("(^|;)med_route_category($|;)", inventory$route_fields)),
+    FALSE
+  )
+)
+fwrite(confirmed_source_check,
+       file.path(output_dir, "confirmed_steroid_source_check.csv"), na = "")
+
 cat("\nGlucocorticoid source profiling complete.\n")
 cat("Medication tables inspected:", nrow(inventory), "\n")
 cat("Candidate vocabulary values:", nrow(candidate_values), "\n")
 cat("Results:", normalizePath(output_dir), "\n")
 cat(paste(
-  "Next step: clinically confirm which values and routes represent systemic",
-  "administered glucocorticoid, which MAR actions count as administrations,",
-  "and how dose equivalents and the treatment grace period will be defined.\n"
+  "Confirmed candidate rule: intermittent med_group='steroid', admin_dttm,",
+  "and med_route_category in {'enteral','iv'}. The minimum qualifying dose,",
+  "dose-equivalence rules, and treatment grace period remain to be finalized.\n"
 ))
