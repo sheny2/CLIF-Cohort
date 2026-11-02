@@ -2,7 +2,8 @@
 
 # Confirm and profile glucocorticoid administrations in a CLIF delivery. The
 # Hopkins definition supplied by the clinical team is intermittent medication
-# administration with med_group == "steroid" and an enteral or IV route. This
+# administration with med_group equal to "steroid" or "steroids" and an
+# enteral or IV route. This
 # remains a candidate exposure definition until the minimum dose and any dose-
 # equivalence rules are supplied. Aggregate values and routes only are exported.
 #
@@ -212,7 +213,7 @@ confirmed_source_check <- data.table(
     "eligible_routes", "dose_threshold"
   ),
   specified_value = c(
-    "clif_medication_admin_intermittent.parquet", "med_group == steroid",
+    "clif_medication_admin_intermittent.parquet", "med_group in {steroid, steroids}",
     "admin_dttm", "med_route_category in {enteral, iv}",
     "PENDING CLINICAL SPECIFICATION"
   ),
@@ -220,7 +221,8 @@ confirmed_source_check <- data.table(
     "clif_medication_admin_intermittent" %in% inventory$source_table,
     any(candidate_values$source_table == "clif_medication_admin_intermittent" &
           candidate_values$source_field == "med_group" &
-          tolower(trimws(candidate_values$source_value)) == "steroid"),
+          tolower(trimws(candidate_values$source_value)) %in%
+            c("steroid", "steroids")),
     any(inventory$source_table == "clif_medication_admin_intermittent" &
           grepl("(^|;)admin_dttm($|;)", inventory$administration_time_fields)),
     any(inventory$source_table == "clif_medication_admin_intermittent" &
@@ -236,7 +238,7 @@ cat("Medication tables inspected:", nrow(inventory), "\n")
 cat("Candidate vocabulary values:", nrow(candidate_values), "\n")
 cat("Results:", normalizePath(output_dir), "\n")
 cat(paste(
-  "Confirmed candidate rule: intermittent med_group='steroid', admin_dttm,",
+  "Confirmed candidate rule: intermittent med_group in {'steroid','steroids'}, admin_dttm,",
   "and med_route_category in {'enteral','iv'}. The minimum qualifying dose,",
   "dose-equivalence rules, and treatment grace period remain to be finalized.\n"
 ))

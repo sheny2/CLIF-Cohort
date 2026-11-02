@@ -3,6 +3,19 @@
 This folder starts a cohort workflow for Hopkins EHR data stored in CLIF format.
 It adapts the MIMIC-IV cohort logic to the Hopkins multisite CLIF.
 
+The current Discovery HPC source at `/projects/emulate_icu/rclif_2_1` is a
+limited CLIF 2.1 extract prepared with these upstream filters:
+
+1. `admission_dttm` in the configured January 2021--December 2026 interval
+   (the extract itself was created in early September 2026).
+2. Admission from the emergency department.
+3. Ever received IMV, NIPPV, or HFNO.
+
+The cohort script intentionally reapplies its ED and respiratory-support rules
+because the analytic criteria are narrower than these shipping filters. The
+source delivery also contains `shipped_flow_chart.csv` for reconciliation with
+the shipped table denominators.
+
 
 ## Current cohort definition
 
@@ -39,13 +52,26 @@ or a constant fallback for an extract already separated by site.
 The Hopkins team confirmed that steroid administrations are stored in
 `clif_medication_admin_intermittent.parquet`, with:
 
-- `med_group == "steroid"`
+- `med_group %in% c("steroid", "steroids")` (both forms are accepted to
+  accommodate the confirmed specification and possible stored vocabulary)
 - administration time in `admin_dttm`
 - candidate systemic routes defined by
   `med_route_category %in% c("enteral", "iv")`
 
-The minimum qualifying dose and any glucocorticoid dose-equivalence rules are
-still pending clinical specification.
+Treatment is defined using these per-administration minimums:
+
+| `med_category` | Minimum dose | Eligible `med_route_category` |
+|---|---:|---|
+| dexamethasone | 6 mg | enteral, iv |
+| hydrocortisone | 50 mg | iv |
+| prednisone | 40 mg | enteral |
+| methylprednisolone | 32 mg | enteral, iv |
+| prednisolone | 40 mg | enteral, iv |
+
+The hydrocortisone rule is 50 mg per administration, reflecting typical q6h or
+q8h dosing and the intended threshold of approximately more than 150 mg/day of
+hydrocortisone-equivalent exposure. The treatment grace period remains a
+separate target-trial parameter.
 
 ## 1. Validate the Hopkins CLIF extract
 
@@ -132,10 +158,8 @@ Review:
 - `glucocorticoid_source_check/glucocorticoid_candidate_routes.csv`
 - `glucocorticoid_source_check/glucocorticoid_search_dictionary.csv`
 
-This step verifies the confirmed `med_group`, administration-time, and route
-fields while also profiling medication names and categories. It does **not** yet
-classify treatment because the qualifying dose threshold and dose-equivalence
-rules have not been finalized.
+This step verifies the confirmed `med_group`, administration-time, dose, and
+route fields while also profiling medication names and categories.
 
 ## 4. Extract candidate steroid administrations
 
@@ -156,9 +180,44 @@ hospitalization IDs and computes `hours_from_time_zero` when the cohort contains
 - `candidate_steroid_attrition.csv`
 - `candidate_steroid_definition.csv`
 
-These are candidate administrations, not the final treatment indicator. The
-definition file explicitly records the dose threshold and dose-equivalence
-rules as pending.
+These are candidate administrations. Drug-specific treatment qualification is
+performed in the next step.
+
+## 5. Apply the steroid dose and route definition
+
+Run without a grace period to audit qualifying administrations:
+
+```bash
+Rscript 04_define_steroid_treatment.R \
+  ./steroid_candidates \
+  ./output \
+  ./steroid_treatment
+```
+
+Once the target-trial grace period is finalized, provide it in hours as the
+fourth argument. For example, if the finalized protocol specifies 24 hours:
+
+```bash
+Rscript 04_define_steroid_treatment.R \
+  ./steroid_candidates \
+  ./output \
+  ./steroid_treatment \
+  24
+```
+
+The script normalizes mg, mcg/ug, and g to mg, applies the five drug-specific
+thresholds, records a reason for every nonqualifying administration, and writes
+a one-row-per-block treatment assignment when a grace period is supplied.
+
+## Data governance
+
+This is a limited data set governed by the approved Discovery HPC environment.
+Do not move patient-level parquet files or other row-level data off the HPC.
+Only appropriately reviewed aggregate results may be moved to the SAFE desktop;
+only publication-level summary results may be placed on OneDrive. Generated
+patient-level directories are git-ignored. Suppressed diagnostic CSVs default
+to suppressing counts below 10; this does not replace project-specific IRB or
+disclosure review.
 
 ## Principal outputs
 

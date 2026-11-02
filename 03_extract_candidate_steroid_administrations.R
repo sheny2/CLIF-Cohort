@@ -3,12 +3,12 @@
 # Extract candidate systemic glucocorticoid administrations for the final CLIF
 # pneumonia cohort using the source fields confirmed by the Hopkins team:
 #   clif_medication_admin_intermittent
-#   med_group == "steroid"
+#   med_group in c("steroid", "steroids")
 #   med_route_category in c("enteral", "iv")
 #   admin_dttm is the administration time
 #
-# This script intentionally does NOT classify treatment. The minimum qualifying
-# dose and dose-equivalence rules are still pending clinical specification.
+# This script intentionally does NOT classify treatment. Drug-specific dose and
+# route rules are applied by 04_define_steroid_treatment.R.
 #
 # Usage:
 #   Rscript 03_extract_candidate_steroid_administrations.R \
@@ -72,7 +72,8 @@ group_values <- dataset |>
   collect() |>
   as.data.table()
 steroid_group_values <- as.character(group_values$med_group)[
-  tolower(trimws(as.character(group_values$med_group))) == "steroid"
+  tolower(trimws(as.character(group_values$med_group))) %in%
+    c("steroid", "steroids")
 ]
 route_values <- dataset |>
   select(med_route_category) |>
@@ -84,7 +85,8 @@ eligible_route_values <- as.character(route_values$med_route_category)[
     c("enteral", "iv")
 ]
 if (!length(steroid_group_values)) {
-  stop("No med_group value equal to 'steroid' was found.", call. = FALSE)
+  stop("No med_group value equal to 'steroid' or 'steroids' was found.",
+       call. = FALSE)
 }
 if (!length(eligible_route_values)) {
   stop("No enteral or iv med_route_category value was found.", call. = FALSE)
@@ -186,7 +188,7 @@ setorder(candidate, patient_id, hospital_block_id, admin_dttm)
 
 audit <- data.table(
   step = c(
-    "All intermittent rows with med_group == steroid",
+    "All intermittent rows with med_group in {steroid, steroids}",
     "Steroid rows with enteral or iv route",
     "Route-eligible steroid rows with nonmissing admin_dttm",
     "Candidate administrations linked to final cohort"
@@ -208,11 +210,11 @@ audit <- data.table(
 definition <- data.table(
   parameter = c(
     "source_table", "med_group", "eligible_routes", "administration_time",
-    "minimum_qualifying_dose", "dose_equivalence", "treatment_classification"
+    "dose_route_definition", "treatment_classification"
   ),
   value = c(
-    "clif_medication_admin_intermittent", "steroid", "enteral;iv",
-    "admin_dttm", "PENDING", "PENDING", "NOT YET PERFORMED"
+    "clif_medication_admin_intermittent", "steroid;steroids", "enteral;iv",
+    "admin_dttm", "See 04_define_steroid_treatment.R", "NOT YET PERFORMED"
   )
 )
 
@@ -225,6 +227,6 @@ fwrite(definition, file.path(output_dir, "candidate_steroid_definition.csv"),
 
 cat("\nCandidate steroid extraction complete.\n")
 print(audit)
-cat("\nNo treatment indicator was assigned: dose threshold and equivalence rules ",
-    "are pending.\n", sep = "")
+cat("\nNo treatment indicator was assigned here; run ",
+    "04_define_steroid_treatment.R next.\n", sep = "")
 cat("Results: ", normalizePath(output_dir), "\n", sep = "")
