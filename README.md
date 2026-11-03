@@ -219,6 +219,41 @@ patient-level directories are git-ignored. Suppressed diagnostic CSVs default
 to suppressing counts below 10; this does not replace project-specific IRB or
 disclosure review.
 
+## 6. Generate aggregate cohort summaries and EDA
+
+Run this step only on Discovery HPC. It reads patient-level cohort and treatment
+files in place but writes only suppressed aggregate CSVs and PNG figures:
+
+```bash
+Rscript 05_cohort_summary_eda.R \
+  /projects/emulate_icu/rclif_2_1 \
+  ./output \
+  ./steroid_treatment \
+  ./summary_eda \
+  10
+```
+
+The fifth argument is the minimum reportable cell size. An exact extraction
+cutoff date is strongly preferred for 28-day follow-up. Once confirmed, supply
+it as the sixth argument:
+
+```bash
+Rscript 05_cohort_summary_eda.R \
+  /projects/emulate_icu/rclif_2_1 \
+  ./output \
+  ./steroid_treatment \
+  ./summary_eda \
+  10 \
+  2026-09-DD
+```
+
+Replace `2026-09-DD` with the actual final observation date. If omitted, the
+script transparently uses the latest observed timestamp as a provisional data
+cutoff and flags that inference. Outputs cover attrition, hospital/site counts,
+treatment uptake and timing, baseline characteristics, missingness, discharge
+outcomes, mortality, and follow-up completeness. Identifier columns are blocked
+from all CSV exports.
+
 ## Principal outputs
 
 - `adult_pneumonia_cohort.parquet` and `.csv`: one eligible block per patient
@@ -238,7 +273,7 @@ disclosure review.
 ## Packages (if needed)
 
 ```r
-install.packages(c("arrow", "data.table", "dplyr"))
+install.packages(c("arrow", "data.table", "dplyr", "ggplot2"))
 ```
 
 ## Native-memory errors
