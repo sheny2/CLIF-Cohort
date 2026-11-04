@@ -86,7 +86,7 @@ data_cutoff_dttm <- as.POSIXct(
 if (is.na(data_cutoff_dttm)) stop("DATA_CUTOFF_DATE must be YYYY-MM-DD.")
 
 step_hours <- 6L
-grace_hours <- 24L
+grace_hours <- as.integer(Sys.getenv("TREATMENT_GRACE_HOURS", unset = "24"))
 horizon_days <- 28L
 tau <- grace_hours %/% step_hours
 M <- horizon_days * 24L %/% step_hours
