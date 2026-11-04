@@ -6,7 +6,7 @@
 # Target-trial emulation (exploratory):
 #   Eligibility: one selected adult pneumonia hospital block per patient
 #   Time zero: respiratory-failure start
-#   Strategy 1: initiate qualifying systemic glucocorticoid within 24 hours
+#   Strategy 1: initiate qualifying systemic glucocorticoid within the grace period
 #   Strategy 0: do not initiate qualifying glucocorticoid through 28 days
 #   Outcome: death within 28 days of respiratory-failure start
 #   Grid: six-hour intervals
@@ -116,7 +116,7 @@ message("Pneumonia cohort: ", normalizePath(cohort_path))
 message("Hospital-block crosswalk: ", normalizePath(crosswalk_path))
 message("Sensitive output: ", normalizePath(sensitive_dir, mustWork = FALSE))
 message("Shareable output: ", normalizePath(shareable_dir, mustWork = FALSE))
-message("Design: 6-hour intervals; 24-hour grace period; 28-day follow-up")
+message("Design: 6-hour intervals; configured grace period; 28-day follow-up")
 message("Maximum sampled patients: ", if (max_patients == 0L) "all" else max_patients)
 message("Administrative data cutoff: ", format(data_cutoff_dttm, "%Y-%m-%d"))
 
@@ -556,7 +556,7 @@ mortality_by_observed_treatment <- cohort[
     ),
     deaths_28d = sum(delta == 1L)
   ),
-  by = .(glucocorticoid_within_24h = A_tau)
+  by = .(glucocorticoid_within_grace = A_tau)
 ]
 mortality_by_observed_treatment[, `:=`(
   deaths_within_grace_percent = 100 * deaths_within_grace / hospital_blocks,
@@ -568,7 +568,7 @@ mortality_by_observed_treatment[, `:=`(
 )]
 write_shareable_csv(
   mortality_by_observed_treatment,
-  "cohort_mortality_by_observed_24h_treatment.csv"
+  "cohort_mortality_by_observed_grace_period_treatment.csv"
 )
 
 # ---- Actual Hopkins hospitals as sites --------------------------------------
@@ -1020,7 +1020,7 @@ design <- list(
   analysis_unit = "one eligible six-hour hospital block per patient",
   time_zero = "respiratory-failure start",
   treatment = "first qualifying systemic glucocorticoid administration",
-  strategy_1 = "initiate qualifying glucocorticoid within 24 hours",
+  strategy_1 = "initiate qualifying glucocorticoid within the grace period",
   strategy_0 = "do not initiate qualifying glucocorticoid through 28 days",
   outcome = "death within 28 days of respiratory-failure start",
   alive_discharge = paste(
@@ -1080,12 +1080,12 @@ site_summary <- cohort_for_site_summary[
     hospital_blocks = .N,
     component_hospitalizations = sum(component_hospitalizations_crosswalk),
     patients = uniqueN(patient_id),
-    glucocorticoid_by_24h = sum(A_tau),
-    glucocorticoid_by_24h_percent = 100 * mean(A_tau),
-    deaths_within_24h = sum(
+    glucocorticoid_by_grace_end = sum(A_tau),
+    glucocorticoid_by_grace_end_percent = 100 * mean(A_tau),
+    deaths_within_grace = sum(
       delta == 1L & is.finite(event_hours) & event_hours <= grace_hours
     ),
-    deaths_within_24h_percent = 100 * mean(
+    deaths_within_grace_percent = 100 * mean(
       delta == 1L & is.finite(event_hours) & event_hours <= grace_hours
     ),
     deaths_28d = sum(delta),
@@ -1098,17 +1098,17 @@ small_cell_n <- suppressWarnings(as.integer(
 ))
 site_summary_shareable <- copy(site_summary)
 for (column in c("hospital_blocks", "component_hospitalizations", "patients",
-                 "glucocorticoid_by_24h", "deaths_within_24h", "deaths_28d")) {
+                 "glucocorticoid_by_grace_end", "deaths_within_grace", "deaths_28d")) {
   site_summary_shareable[
     get(column) > 0L & get(column) < small_cell_n,
     (column) := NA_integer_
   ]
 }
 site_summary_shareable[
-  is.na(glucocorticoid_by_24h), glucocorticoid_by_24h_percent := NA_real_
+  is.na(glucocorticoid_by_grace_end), glucocorticoid_by_grace_end_percent := NA_real_
 ]
 site_summary_shareable[
-  is.na(deaths_within_24h), deaths_within_24h_percent := NA_real_
+  is.na(deaths_within_grace), deaths_within_grace_percent := NA_real_
 ]
 site_summary_shareable[is.na(deaths_28d), deaths_28d_percent := NA_real_]
 site_summary_shareable[, small_cell_threshold := small_cell_n]
@@ -1206,7 +1206,7 @@ write_shareable_csv(
 # The diagnostics below calculate interval-specific standardized mean
 # differences (SMDs) using the exact risk sets and weights used by each
 # estimator.  The plotted value is the largest absolute SMD during the four
-# treatment-decision intervals in the 24-hour grace period.  The complete
+# treatment-decision intervals in the configured grace period.  The complete
 # interval-specific results are also saved so balance later in follow-up can be
 # inspected without exposing patient-level data.
 #
@@ -1454,7 +1454,7 @@ write_shareable_csv(
 
 # The Love plots use the worst absolute imbalance observed in the grace period.
 # This avoids concealing a poorly balanced treatment-decision interval by
-# averaging SMDs over time.  Landmark has one assessment at hour 24.
+# averaging SMDs over time.  Landmark has one assessment at the end of the grace period.
 balance_love_data <- balance_by_interval[
   within_grace_period == TRUE &
     is.finite(smd_before) & is.finite(smd_after),
@@ -1529,15 +1529,15 @@ for (method_key_value in names(balance_method_labels)) {
       title = paste0(balance_method_labels[[method_key_value]],
                      ": covariate balance"),
       subtitle = if (method_key_value == "landmark_ipw") {
-        "Absolute SMD at the 24-hour landmark"
+        "Absolute SMD at the end-of-grace-period landmark"
       } else if (method_key_value == "perprotocol_naive") {
         paste(
-          "Worst absolute SMD across the four treatment-decision intervals;",
+          "Worst absolute SMD across treatment-decision intervals in the grace period;",
           "before and after are identical because this method is unweighted"
         )
       } else {
         paste(
-          "Worst absolute SMD across the four treatment-decision intervals;",
+          "Worst absolute SMD across treatment-decision intervals in the grace period;",
           "dashed line = 0.10"
         )
       },
@@ -1659,7 +1659,7 @@ survival_plot <- ggplot(
   labs(
     title = "Severe CAP: five-method survival comparison",
     subtitle = paste(
-      "Qualifying glucocorticoid initiation within 24 hours vs",
+      "Qualifying glucocorticoid initiation within the grace period vs",
       "no initiation through day 28; five Hopkins hospitals"
     ),
         x = "Days since respiratory-failure start",

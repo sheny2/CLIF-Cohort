@@ -60,7 +60,7 @@ Rscript 03_extract_candidate_steroid_administrations.R \
   "$COHORT_OUTPUT_DIR" \
   "$STEROID_CANDIDATE_DIR"
 
-# 8. Apply drug-, dose-, route-, and 24-hour grace-period rules.
+# 8. Apply drug-, dose-, route-, and configured grace-period rules.
 Rscript 04_define_steroid_treatment.R \
   "$STEROID_CANDIDATE_DIR" \
   "$COHORT_OUTPUT_DIR" \

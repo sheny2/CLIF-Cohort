@@ -281,12 +281,12 @@ and compares:
    of weighted risk/event counts.
 2. Pooled site-stratified CCW, implemented as the exact centralized identity
    control for the federated estimator.
-3. Federated landmark IPW among patients alive and observed at 24 hours.
+3. Federated landmark IPW among patients alive and observed at the end of the grace period.
 4. IPCW without cloning.
 5. Unweighted per-protocol analysis.
 
 The target strategies are initiation of a qualifying systemic glucocorticoid
-within 24 hours versus no qualifying initiation through day 28. Follow-up uses
+within the grace period versus no qualifying initiation through day 28. Follow-up uses
 six-hour intervals through 28 days. Run:
 
 ```bash
@@ -316,8 +316,8 @@ separate Love plots for CCW, landmark IPW, IPCW without cloning, and the
 unweighted per-protocol analysis. Federated and pooled site-stratified CCW
 share one CCW plot because their local nuisance models, weights, and risk sets
 are identical by design. The Love plots show the worst absolute SMD across the
-four six-hour treatment-decision intervals; the landmark plot is evaluated at
-24 hours. For the unweighted per-protocol method, the before/after points are
+six-hour treatment-decision intervals within the grace period; the landmark
+plot is evaluated at the end of the grace period. For the unweighted per-protocol method, the before/after points are
 intentionally identical.
 
 Baseline adjustment includes age, sex and a missing-sex indicator, baseline
