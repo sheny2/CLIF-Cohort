@@ -9,13 +9,13 @@
 # Default inclusion criteria:
 #   1. valid completed hospital block; age >=18 and <120 years
 #   2. admission_type_category == "ed" for the first component encounter
-#   3. ICD-10-CM J12.*, J13-J16.*, or J18.* present on admission, in any
+#   3. ICD-10-CM J12.*, J13-J17.*, or J18.* present on admission, in any
 #      diagnosis position
 #   4. time zero at initiation of IMV or NIPPV, or initiation of HFNO with
 #      S/F <315 while FiO2 >0.50; no future support-duration requirement
 #   5. no DNR/DNI-equivalent code status at time zero
 #   6. no concurrent shock proxy at time zero: any norepinephrine/epinephrine
-#      on NIPPV/HFNO, norepinephrine/epinephrine >=0.25 mcg/kg/min on IMV,
+#      on NIPPV/HFNO, norepinephrine/epinephrine >0.25 mcg/kg/min on IMV,
 #      any vasopressin, or lactate >=4 mmol/L
 #   7. no recorded death before time zero
 #
@@ -989,7 +989,7 @@ respiratory_eligibility[, `:=`(
   exclude_high_dose_pressor_imv = as.integer(
     respiratory_support_category == "imv" &
       is.finite(max_catecholamine_dose_mcg_kg_min) &
-      max_catecholamine_dose_mcg_kg_min >= high_dose_pressor_threshold
+      max_catecholamine_dose_mcg_kg_min > high_dose_pressor_threshold
   ),
   exclude_vasopressin = as.integer(active_vasopressin == 1L),
   exclude_high_lactate = as.integer(
@@ -1185,7 +1185,7 @@ attrition <- rbindlist(list(
   cbind(data.table(step = "Blocks without norepinephrine/epinephrine on NIPPV/HFNO"),
         count_blocks(no_pressor_niv_blocks)),
   cbind(data.table(step = paste0(
-    "Blocks without norepinephrine/epinephrine >=",
+    "Blocks without norepinephrine/epinephrine >",
     high_dose_pressor_threshold, " mcg/kg/min on IMV"
   )), count_blocks(no_high_dose_imv_blocks)),
   cbind(data.table(step = "Blocks without active vasopressin at time zero"),
@@ -1219,7 +1219,8 @@ design_summary <- data.table(
     "future_support_duration_required", "exclude_death_before_time_zero",
     "exclude_dni_equivalent_at_time_zero",
     "shock_lookback_hours", "lactate_lookback_hours",
-    "imv_catecholamine_threshold_mcg_kg_min", "lactate_threshold_mmol_l",
+    "imv_catecholamine_threshold_mcg_kg_min",
+    "imv_catecholamine_threshold_operator", "lactate_threshold_mmol_l",
     "active_pressor_definition", "influenza_exclusion_source",
     "missing_shock_data_policy", "one_eligible_block_per_patient",
     "selection_seed", "duplicate_hospitalization_rows_beyond_first",
@@ -1233,11 +1234,11 @@ design_summary <- data.table(
     ])), collapse = ";"),
     "hospital_block", block_gap_hours, TRUE,
     age_min, age_max_exclusive, "ed",
-    case_definition, "J12.*;J13-J16.*;J18.*", TRUE, "any",
+    case_definition, "J12.*;J13-J17.*;J18.*", TRUE, "any",
     "imv;nippv;high_flow_nc", support_start_days, baseline_pairing_hours,
     hfno_sf_max_exclusive, hfno_fio2_min_exclusive,
     FALSE, TRUE, TRUE, shock_lookback_hours, lactate_lookback_hours,
-    high_dose_pressor_threshold, lactate_exclusion_threshold,
+    high_dose_pressor_threshold, ">", lactate_exclusion_threshold,
     "most recent continuous-medication record in prior lookback window",
     "present-on-admission ICD-10-CM J09-J11",
     "retain and flag when no exclusion evidence is observed",
@@ -1248,16 +1249,17 @@ design_summary <- data.table(
 
 icd_definition <- data.table(
   code_system = "ICD-10-CM",
-  qualifying_codes = "J12.*;J13-J16.*;J18.*",
+  qualifying_codes = "J12.*;J13-J17.*;J18.*",
   required_poa_present = TRUE,
   diagnosis_position = "any",
   nonqualifying_or_excluded_codes = paste(
-    "J09-J11 influenza;J17 pneumonia in diseases classified elsewhere;",
+    "J09-J11 influenza;",
     "J69 aspiration;J95.851 ventilator-associated pneumonia"
   ),
   note = paste(
     "U07.1 and organism/sepsis codes do not qualify without a qualifying",
-    "pneumonia diagnosis; J12.82 is included through J12.*"
+    "pneumonia diagnosis; J12.82 is included through J12.*;",
+    "J17.* included per Chad review of Smithee et al. (PMID: 32782916)"
   )
 )
 

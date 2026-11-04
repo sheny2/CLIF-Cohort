@@ -1,12 +1,14 @@
 # Shared ICD-10-CM helpers for the Hopkins severe-CAP cohort.
 #
 # The primary definition agreed for this target-trial emulation is an explicit
-# pneumonia diagnosis from J12.*, J13-J16.*, or J18.* that is documented as
+# pneumonia diagnosis from J12.*, J13-J17.*, or J18.* that is documented as
 # present on admission. Diagnosis position is not restricted. Codes for
-# influenza pneumonia (J09-J11), pneumonia in diseases classified elsewhere
-# (J17), aspiration (J69), and ventilator-associated pneumonia (J95.851) do not
+# influenza pneumonia (J09-J11), aspiration (J69), and ventilator-associated
+# pneumonia (J95.851) do not
 # qualify. Etiology or sepsis codes (for example U07.1, B95.3, B96.1, B97.29,
 # and A40.3) are not sufficient without a qualifying pneumonia diagnosis.
+# J17.* is included per Chad's review of Smithee et al. (PMID: 32782916;
+# https://pubmed.ncbi.nlm.nih.gov/32782916/). Influenza remains excluded.
 
 normalize_icd_format <- function(x) {
   value <- toupper(gsub("[^A-Z0-9]", "", as.character(x)))
@@ -39,12 +41,11 @@ classify_pneumonia_icd <- function(code, format) {
   icd10 <- format_clean == "ICD10CM"
 
   qualifying_pneumonia <- icd10 & grepl(
-    "^J(12|13|14|15|16|18)[A-Z0-9]*$", code_clean
+    "^J(12|13|14|15|16|17|18)[A-Z0-9]*$", code_clean
   )
   influenza_pneumonia <- icd10 & grepl("^J(09|10|11)[A-Z0-9]*$", code_clean)
   excluded_pneumonia <- icd10 & (
-    grepl("^J17[A-Z0-9]*$", code_clean) |
-      grepl("^J69[A-Z0-9]*$", code_clean) |
+    grepl("^J69[A-Z0-9]*$", code_clean) |
       code_clean == "J95851"
   )
 
