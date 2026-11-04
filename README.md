@@ -257,9 +257,11 @@ pipeline_output/
 │   ├── glucocorticoid_source_profile/
 │   ├── cohort/
 │   ├── steroid_candidates/
-│   └── steroid_treatment/
+│   ├── steroid_treatment/
+│   └── ccw_analysis/
 └── shareable/
-    └── cohort_summary_eda/
+    ├── cohort_summary_eda/
+    └── ccw_results/
 ```
 
 Everything under `sensitive/` must remain on Discovery. The `shareable/`
@@ -267,6 +269,51 @@ branch contains only identifier-free, small-cell-suppressed summaries and
 figures, including copies of cohort attrition, design, and ICD-definition
 metadata. These outputs still require the usual disclosure review before
 being moved from the HPC.
+
+## 7. Run the five-method target-trial analysis
+
+`06_generalized_five_methods.R` contains the reusable estimator library.
+`07_prepare_and_run_five_methods.R` prepares the Hopkins person-interval data
+and compares:
+
+1. Federated CCW with hospital-specific nuisance models and central aggregation
+   of weighted risk/event counts.
+2. Pooled site-stratified CCW, implemented as the exact centralized identity
+   control for the federated estimator.
+3. Federated landmark IPW among patients alive and observed at 24 hours.
+4. IPCW without cloning.
+5. Unweighted per-protocol analysis.
+
+The target strategies are initiation of a qualifying systemic glucocorticoid
+within 24 hours versus no qualifying initiation through day 28. Follow-up uses
+six-hour intervals through 28 days. Run:
+
+```bash
+Rscript 07_prepare_and_run_five_methods.R \
+  /projects/emulate_icu/rclif_2_1 \
+  ./pipeline_output/sensitive/cohort \
+  ./pipeline_output/sensitive/steroid_treatment \
+  ./pipeline_output/sensitive/ccw_analysis \
+  ./pipeline_output/shareable/ccw_results \
+  0 \
+  2026-10-31
+```
+
+The sixth argument is the maximum patient count; `0` uses the full cohort.
+Patient/block-level person-period data, crosswalks, fitted components, and RDS
+objects remain under `sensitive/ccw_analysis`; the interval-specific weighted
+risk/event counts transmitted by hospitals also remain there because small
+event cells can occur. Identifier-free method estimates,
+survival curves, effect plots, model specifications, covariate-processing
+summaries, hospital summaries, warnings, and the federated-versus-pooled
+identity check are written to `shareable/ccw_results`.
+
+Baseline adjustment includes age, sex and a missing-sex indicator, baseline
+respiratory support, initial ICU/ED location, admission year and season, and
+present-on-admission comorbidity proxies. Time-varying adjustment considers
+temperature, WBC, glucose, albumin, pH, PaCO2, S/F ratio, respiratory-support
+intensity, and a non-respiratory SOFA proxy, with explicit missingness
+indicators. Availability checks remove variables that are absent or constant.
 
 ## Principal outputs
 

@@ -17,9 +17,11 @@ export GLUCOCORTICOID_CHECK_DIR="$SENSITIVE_ROOT/glucocorticoid_source_profile"
 export COHORT_OUTPUT_DIR="$SENSITIVE_ROOT/cohort"
 export STEROID_CANDIDATE_DIR="$SENSITIVE_ROOT/steroid_candidates"
 export STEROID_TREATMENT_DIR="$SENSITIVE_ROOT/steroid_treatment"
+export CCW_SENSITIVE_DIR="$SENSITIVE_ROOT/ccw_analysis"
 
 # Disclosure-controlled summaries and figures that may be reviewed for export.
 export SUMMARY_EDA_DIR="$SHAREABLE_ROOT/cohort_summary_eda"
+export CCW_SHAREABLE_DIR="$SHAREABLE_ROOT/ccw_results"
 
 mkdir -p "$SENSITIVE_ROOT" "$SHAREABLE_ROOT"
 
@@ -31,6 +33,7 @@ export CLIF_SITE_ID=hopkins_unspecified
 export TREATMENT_GRACE_HOURS=24
 export SUMMARY_SMALL_CELL_THRESHOLD=10
 export CLIF_DATA_CUTOFF_DATE=2026-10-31
+export CCW_MAX_PATIENTS=0
 
 # 4. Validate files, schemas, category values, POA, lactate, and pressors.
 Rscript 00_check_clif_cohort_inputs.R \
@@ -74,9 +77,21 @@ Rscript 05_cohort_summary_eda.R \
   "$SUMMARY_SMALL_CELL_THRESHOLD" \
   "$CLIF_DATA_CUTOFF_DATE"
 
-# 10. Review aggregate outputs that may be moved only after disclosure review.
+# 10. Run the five-method target-trial analysis. Script 06 contains the method
+# library and is sourced automatically by script 07.
+Rscript 07_prepare_and_run_five_methods.R \
+  "$CLIF_DATA_DIR" \
+  "$COHORT_OUTPUT_DIR" \
+  "$STEROID_TREATMENT_DIR" \
+  "$CCW_SENSITIVE_DIR" \
+  "$CCW_SHAREABLE_DIR" \
+  "$CCW_MAX_PATIENTS" \
+  "$CLIF_DATA_CUTOFF_DATE"
+
+# 11. Review aggregate outputs that may be moved only after disclosure review.
 # Everything under sensitive/ must remain on the approved Discovery HPC.
 # Files under shareable/ are aggregate and disclosure-controlled, but still
 # require the project's usual disclosure review before being moved.
 ls -lh "$INPUT_CHECK_DIR"
 ls -lh "$SUMMARY_EDA_DIR"
+ls -lh "$CCW_SHAREABLE_DIR"
