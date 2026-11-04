@@ -387,7 +387,9 @@ write_summary(outcome_summary, "mortality_by_treatment_suppressed.csv")
 
 continuous_candidates <- intersect(c(
   "age_at_admission", "length_of_stay_days", "hours_admission_to_time_zero",
-  "respiratory_support_duration_hours", "sf_24_min", "pf_24_min"
+  "respiratory_support_duration_hours", "baseline_sf_ratio",
+  "baseline_fio2", "baseline_spo2", "lactate_value", "weight_kg",
+  "max_catecholamine_dose_mcg_kg_min"
 ), names(cohort))
 continuous_parts <- lapply(continuous_candidates, function(variable) {
   cohort[, {
@@ -501,8 +503,9 @@ quality_flags <- data.table(
     "five observed hospitals", "patient death_dttm available",
     "data cutoff explicitly supplied", "complete 28-day follow-up",
     "treatment grace period available", "complete grace-period follow-up",
-    "negative treatment times",
-    "death before time zero", "invalid length of stay"
+    "negative treatment times", "death before time zero",
+    "invalid length of stay", "missing baseline lactate",
+    "indeterminate active catecholamine dose"
   ),
   value = c(
     !anyDuplicated(cohort$patient_id), !anyDuplicated(cohort$hospital_block_id),
@@ -513,7 +516,11 @@ quality_flags <- data.table(
       sum(cohort$treatment_hours_from_time_zero < 0, na.rm = TRUE) else NA,
     sum(cohort$event_hours < 0, na.rm = TRUE),
     if ("length_of_stay_days" %in% names(cohort))
-      sum(cohort$length_of_stay_days < 0, na.rm = TRUE) else NA
+      sum(cohort$length_of_stay_days < 0, na.rm = TRUE) else NA,
+    if ("lactate_missing_at_baseline" %in% names(cohort))
+      sum(cohort$lactate_missing_at_baseline == 1L, na.rm = TRUE) else NA,
+    if ("catecholamine_dose_indeterminate" %in% names(cohort))
+      sum(cohort$catecholamine_dose_indeterminate == 1L, na.rm = TRUE) else NA
   ),
   note = c(
     "Expected TRUE", "Expected TRUE", "Expected TRUE for Hopkins extract",
@@ -522,8 +529,9 @@ quality_flags <- data.table(
     "Denominator for crude 28-day mortality",
     "Required for treated-within-grace assignment",
     "Denominator for treatment assignment and grace-period mortality",
-    "Expected 0",
-    "Expected 0", "Expected 0"
+    "Expected 0", "Expected 0", "Expected 0",
+    "Retained and flagged; report as an eligibility-data diagnostic",
+    "Retained and flagged; report as an eligibility-data diagnostic"
   )
 )
 write_summary(quality_flags, "data_quality_checks.csv")

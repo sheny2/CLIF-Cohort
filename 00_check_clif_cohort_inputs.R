@@ -41,7 +41,7 @@ requirements <- list(
   ),
   clif_hospital_diagnosis.parquet = c(
     "hospitalization_id", "diagnosis_code", "diagnosis_code_format",
-    "diagnosis_primary"
+    "diagnosis_primary", "poa_present"
   ),
   clif_respiratory_support.parquet = c(
     "hospitalization_id", "recorded_dttm", "device_category", "fio2_set",
@@ -56,6 +56,10 @@ requirements <- list(
   ),
   clif_code_status.parquet = c(
     "patient_id", "start_dttm", "code_status_category"
+  ),
+  clif_medication_admin_continuous.parquet = c(
+    "hospitalization_id", "admin_dttm", "med_category", "med_dose",
+    "med_dose_unit", "mar_action_category"
   )
 )
 
@@ -168,6 +172,9 @@ category_specs <- list(
   diagnosis_code_format = list(
     file = "clif_hospital_diagnosis.parquet", column = "diagnosis_code_format"
   ),
+  poa_present = list(
+    file = "clif_hospital_diagnosis.parquet", column = "poa_present"
+  ),
   device_category = list(
     file = "clif_respiratory_support.parquet", column = "device_category"
   ),
@@ -179,6 +186,16 @@ category_specs <- list(
   ),
   code_status_category = list(
     file = "clif_code_status.parquet", column = "code_status_category"
+  ),
+  continuous_med_category = list(
+    file = "clif_medication_admin_continuous.parquet", column = "med_category"
+  ),
+  continuous_med_dose_unit = list(
+    file = "clif_medication_admin_continuous.parquet", column = "med_dose_unit"
+  ),
+  continuous_mar_action_category = list(
+    file = "clif_medication_admin_continuous.parquet",
+    column = "mar_action_category"
   )
 )
 
@@ -207,9 +224,11 @@ required_category_checks <- data.table(
   check = c(
     "ED admission category observed",
     "ICD-9-CM or ICD-10-CM format observed",
+    "pneumonia present-on-admission field is populated",
     "qualifying respiratory device category observed",
     "SpO2 vital category observed",
-    "arterial PaO2 lab category observed"
+    "lactate lab category observed",
+    "shock vasopressor medication category observed"
   ),
   passed = c(
     category_rows[field == "admission_type_category",
@@ -217,20 +236,26 @@ required_category_checks <- data.table(
     category_rows[field == "diagnosis_code_format",
                   any(grepl("ICD.?9|ICD.?10|^9$|^10$", value,
                             ignore.case = TRUE))],
+    category_rows[field == "poa_present", any(!is.na(value) & nzchar(value))],
     category_rows[field == "device_category",
                   any(tolower(trimws(value)) %in%
                         c("imv", "nippv", "high_flow_nc", "nasal_cannula"))],
     category_rows[field == "vital_category",
                   any(tolower(trimws(value)) == "spo2")],
     category_rows[field == "lab_category",
-                  any(tolower(trimws(value)) == "po2_arterial")]
+                  any(tolower(trimws(value)) == "lactate")],
+    category_rows[field == "continuous_med_category",
+                  any(tolower(trimws(value)) %in%
+                        c("norepinephrine", "epinephrine", "vasopressin"))]
   ),
   note = c(
     "Required by the current ED-only cohort definition",
     "Required by the pneumonia ICD classifier",
-    "Required by the respiratory-support eligibility rule",
-    "Required for the S/F branch",
-    "Required for the P/F branch; the cohort can still qualify through S/F"
+    "Required by the POA pneumonia definition",
+    "Required by the initiation-based respiratory-support rule",
+    "Required for the HFNO S/F branch",
+    "Required by the concurrent-shock exclusion",
+    "Required by the concurrent-shock exclusion"
   )
 )
 fwrite(required_category_checks,

@@ -20,17 +20,16 @@ the shipped table denominators.
 ## Current cohort definition
 
 The extraction script constructs hospital blocks and retains one eligible block
-per patient using these rules (largely based on previous codes):
+per patient using the CAPE COD-aligned rules confirmed for this emulation:
 
 1. Combine overlapping hospitalizations and consecutive hospitalizations whose gap is no more than six hours.
 2. Require valid admission/discharge timestamps, a patient identifier, and age at least 18 (but less than 120 years).
 3. Require the first component encounter to have `admission_type_category == "ed"`.
-4. Apply the pneumonia coding definition: principal pneumonia, or secondary pneumonia with principal sepsis or respiratory failure in the same component hospitalization.
-5. Require at least 24 continuous hours of IMV, NIPPV, or HFNC at least 30 L/min, beginning within seven days of block admission.
-6. Define time zero as the beginning of the first qualifying respiratory-support episode.
-7. During the first 24 hours after time zero, require FiO2 documentation, exclude tracheostomy, and require an eligible P/F or S/F measurement paired to FiO2 within four hours. S/F requires SpO2 80--97%; P/F requires PaO2 40--700 and excludes ratios of 600 or greater.
-8. Exclude DNI-equivalent code status (`and`, `dnr/dni`, or `dnar/dni` after normalization) recorded from seven days before through 24 hours after time zero.
-9. Randomly select one eligible block per patient.
+4. Require an ICD-10-CM code from `J12.*`, `J13-J16.*`, or `J18.*` in any diagnosis position with `poa_present == 1`. Influenza (`J09-J11`), pneumonia in diseases classified elsewhere (`J17.*`), aspiration (`J69.*`), and ventilator-associated pneumonia (`J95.851`) are exclusionary when present on admission. `U07.1` and organism/sepsis codes do not qualify without a qualifying pneumonia diagnosis; `J12.82` qualifies through `J12.*`.
+5. Define time zero as the first eligible initiation of IMV or NIPPV, or HFNO initiation with a contemporaneous S/F ratio below 315 while FiO2 is greater than 0.50. SpO2 and HFNO FiO2 records are paired within four hours. No future respiratory-support duration is required.
+6. Exclude DNR/DNI-equivalent code status (`and`, `dnr`, `dni`, `dnar`, `dnr/dni`, or `dnar/dni` after normalization) documented during the seven days before and through time zero.
+7. Exclude the concurrent-shock proxy at time zero: any active norepinephrine/epinephrine on NIPPV or HFNO; norepinephrine/epinephrine at least 0.25 mcg/kg/min on IMV; any active vasopressin; or lactate at least 4 mmol/L. The most recent medication and lactate records in the preceding six hours are used. Missing or nonconvertible shock data are retained and flagged rather than treated as evidence of shock.
+8. Randomly select one eligible block per patient.
 
 
 
@@ -42,6 +41,7 @@ per patient using these rules (largely based on previous codes):
 - `clif_vitals.parquet`
 - `clif_labs.parquet`
 - `clif_code_status.parquet`
+- `clif_medication_admin_continuous.parquet`
 
 For multisite attribution, `clif_adt.parquet` is strongly recommended. The
 builder uses the `hospital_id` on the first chronological ADT record for each
@@ -98,7 +98,7 @@ site-specific category values still differ.
 Rscript 01_build_adult_pneumonia_cohort.R \
   /path/to/hopkins/clif \
   ./output \
-  expanded \
+  poa_any \
   6 \
   32284 \
   hopkins_unspecified
@@ -108,7 +108,7 @@ The arguments are:
 
 1. CLIF data directory (required unless `CLIF_DATA_DIR` is set)
 2. Output directory
-3. Pneumonia definition: `expanded`, `principal`, or `any`
+3. Pneumonia definition compatibility argument: `poa_any` only
 4. Hospital-block gap in hours
 5. One-block-per-patient random-selection seed
 6. Fallback site identifier (or set `CLIF_SITE_ID`); use only when ADT/site

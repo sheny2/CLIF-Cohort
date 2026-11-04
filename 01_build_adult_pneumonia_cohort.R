@@ -9,21 +9,22 @@
 # Default inclusion criteria:
 #   1. valid completed hospital block; age >=18 and <120 years
 #   2. admission_type_category == "ed" for the first component encounter
-#   3. expanded pneumonia diagnosis definition (see pneumonia_icd_helpers.R)
-#   4. >=24 continuous hours of IMV, NIPPV, or HFNC >=30 L/min, with the
-#      qualifying episode beginning within seven days after block admission
-#   5. FiO2 documented and no tracheostomy in the first 24 hours of the episode
-#   6. no DNI-equivalent code status in the example Rmd's eligibility window
-#   7. eligible P/F or S/F ratio in the first 24 hours: oxygen measurement and
-#      valid FiO2 documentation within four hours; S/F additionally requires
-#      SpO2 80-97%. P/F uses PaO2 40-700 and excludes ratios >=600.
+#   3. ICD-10-CM J12.*, J13-J16.*, or J18.* present on admission, in any
+#      diagnosis position
+#   4. time zero at initiation of IMV or NIPPV, or initiation of HFNO with
+#      S/F <315 while FiO2 >0.50; no future support-duration requirement
+#   5. no DNR/DNI-equivalent code status at time zero
+#   6. no concurrent shock proxy at time zero: any norepinephrine/epinephrine
+#      on NIPPV/HFNO, norepinephrine/epinephrine >=0.25 mcg/kg/min on IMV,
+#      any vasopressin, or lactate >=4 mmol/L
 #
 # Usage:
 #   Rscript 01_build_adult_pneumonia_cohort.R \
 #     CLIF_DATA_DIR [OUTPUT_DIR] [CASE_DEFINITION] [BLOCK_GAP_HOURS] [SEED] \
 #     [FALLBACK_SITE_ID] [HOSPITALIZATION_SITE_COLUMN]
 #
-# CASE_DEFINITION: expanded (default), principal, or any.
+# CASE_DEFINITION is retained only for command compatibility and must be
+# "poa_any" (or omitted). Older expanded/principal/any definitions are retired.
 
 rm(list = ls())
 
@@ -64,18 +65,16 @@ output_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
   file.path(script_dir, "output")
 
 case_definition <- if (length(args) >= 3L && nzchar(args[3L])) args[3L] else
-  Sys.getenv("PNEUMONIA_CASE_DEFINITION", unset = "expanded")
+  Sys.getenv("PNEUMONIA_CASE_DEFINITION", unset = "poa_any")
 case_definition <- tolower(trimws(case_definition))
-# Backward compatibility for the former PRIMARY_ONLY Boolean argument.
-if (case_definition %in% c("true", "t", "1", "yes", "y")) {
-  case_definition <- "principal"
+if (!case_definition %in% c("poa_any", "poa")) {
+  stop(
+    "CASE_DEFINITION must be 'poa_any'. The older expanded/principal/any ",
+    "definitions are retired for the CAPE COD emulation.",
+    call. = FALSE
+  )
 }
-if (case_definition %in% c("false", "f", "0", "no", "n")) {
-  case_definition <- "any"
-}
-if (!case_definition %in% c("expanded", "principal", "any")) {
-  stop("CASE_DEFINITION must be expanded, principal, or any.", call. = FALSE)
-}
+case_definition <- "poa_any"
 
 block_gap_hours <- if (length(args) >= 4L && nzchar(args[4L])) {
   suppressWarnings(as.numeric(args[4L]))
@@ -109,18 +108,20 @@ requested_site_column <- trimws(as.character(requested_site_column))
 age_min <- 18
 age_max_exclusive <- 120
 support_start_days <- 7
-support_duration_hours <- 24
-support_data_days <- support_start_days + support_duration_hours / 24
-oxygenation_window_hours <- 24
+support_data_days <- support_start_days + 1
+baseline_pairing_hours <- 4
 fio2_pairing_hours <- 4
 fio2_min <- 0.21
 fio2_max <- 1
 spo2_min <- 80
-spo2_max_for_sf <- 97
-pao2_min <- 40
-pao2_max <- 700
-pf_max_exclusive <- 600
-hfnc_min_lpm <- 30
+spo2_max <- 100
+hfno_sf_max_exclusive <- 315
+hfno_fio2_min_exclusive <- 0.50
+shock_lookback_hours <- 6
+lactate_lookback_hours <- 6
+weight_lookback_hours <- 24
+high_dose_pressor_threshold <- 0.25
+lactate_exclusion_threshold <- 4
 
 paths <- c(
   hospitalization = file.path(data_dir, "clif_hospitalization.parquet"),
@@ -128,7 +129,10 @@ paths <- c(
   respiratory_support = file.path(data_dir, "clif_respiratory_support.parquet"),
   vitals = file.path(data_dir, "clif_vitals.parquet"),
   labs = file.path(data_dir, "clif_labs.parquet"),
-  code_status = file.path(data_dir, "clif_code_status.parquet")
+  code_status = file.path(data_dir, "clif_code_status.parquet"),
+  continuous_medication = file.path(
+    data_dir, "clif_medication_admin_continuous.parquet"
+  )
 )
 missing_files <- paths[!file.exists(paths)]
 if (length(missing_files)) {
@@ -142,8 +146,11 @@ message("Output directory: ", normalizePath(output_dir, mustWork = FALSE))
 message("Pneumonia case definition: ", case_definition)
 message("Admission type restriction: ed")
 message("Hospital-block gap: ", block_gap_hours, " hours")
-message("Respiratory support: >=", support_duration_hours,
-        " continuous hours starting within ", support_start_days, " days")
+message("Respiratory eligibility: IMV/NIPPV initiation, or HFNO initiation ",
+        "with S/F <", hfno_sf_max_exclusive, " and FiO2 >",
+        hfno_fio2_min_exclusive, "; no minimum future duration")
+message("Shock lookback: ", shock_lookback_hours,
+        " hours; lactate lookback: ", lactate_lookback_hours, " hours")
 message("One-block-per-patient selection seed: ", selection_seed)
 message("Fallback CLIF site ID: ", fallback_site_id)
 if (nzchar(requested_site_column)) {
@@ -283,7 +290,7 @@ hospitalization <- open_dataset(paths[["hospitalization"]]) |>
   as.data.table()
 diagnosis <- open_dataset(paths[["diagnosis"]]) |>
   select(hospitalization_id, diagnosis_code, diagnosis_code_format,
-         diagnosis_primary) |>
+         diagnosis_primary, poa_present) |>
   collect() |>
   as.data.table()
 
@@ -293,7 +300,7 @@ check_columns(hospitalization, c(
 ), "clif_hospitalization.parquet")
 check_columns(diagnosis, c(
   "hospitalization_id", "diagnosis_code", "diagnosis_code_format",
-  "diagnosis_primary"
+  "diagnosis_primary", "poa_present"
 ), "clif_hospital_diagnosis.parquet")
 check_columns(open_dataset(paths[["respiratory_support"]])$schema$names, c(
   "hospitalization_id", "recorded_dttm", "device_category", "fio2_set",
@@ -308,6 +315,10 @@ check_columns(open_dataset(paths[["labs"]])$schema$names, c(
 check_columns(open_dataset(paths[["code_status"]])$schema$names, c(
   "patient_id", "start_dttm", "code_status_category"
 ), "clif_code_status.parquet")
+check_columns(open_dataset(paths[["continuous_medication"]])$schema$names, c(
+  "hospitalization_id", "admin_dttm", "med_category", "med_dose",
+  "med_dose_unit", "mar_action_category"
+), "clif_medication_admin_continuous.parquet")
 
 for (x in list(hospitalization, diagnosis)) {
   x[, hospitalization_id := as.character(hospitalization_id)]
@@ -463,16 +474,10 @@ setorder(hospital_blocks, patient_id, admission_dttm, hospital_block_id)
 
 # ---- Diagnosis eligibility ---------------------------------------------------
 
-message("Applying ICD-9-CM/ICD-10-CM pneumonia case definition...")
+message("Applying POA ICD-10-CM pneumonia definition...")
 icd <- derive_pneumonia_encounter_flags(diagnosis)
 diagnoses_classified <- icd$diagnoses
 diagnosis_encounters <- icd$encounters
-diagnosis_encounters[, diagnosis_case := switch(
-  case_definition,
-  expanded = expanded_pneumonia_case,
-  principal = principal_pneumonia,
-  any = any_pneumonia
-)]
 
 diagnosis_encounters <- merge(
   diagnosis_encounters,
@@ -481,8 +486,6 @@ diagnosis_encounters <- merge(
   )],
   by = "hospitalization_id", all = FALSE, sort = FALSE
 )
-qualifying_encounters <- diagnosis_encounters[diagnosis_case == 1L]
-
 diagnoses_classified <- merge(
   diagnoses_classified,
   hospital_block_crosswalk_all[, .(
@@ -491,17 +494,30 @@ diagnoses_classified <- merge(
   by = "hospitalization_id", all = FALSE, sort = FALSE
 )
 diagnoses_classified <- diagnoses_classified[
-  is_pneumonia_code == 1L | is_sepsis_code == 1L |
-    is_respiratory_failure_code == 1L
+  is_qualifying_pneumonia_code == 1L |
+    is_influenza_pneumonia_code == 1L |
+    is_explicitly_excluded_pneumonia_code == 1L
 ]
 
-diagnosis_summary_by_block <- qualifying_encounters[, .(
-  pneumonia_primary = as.integer(any(principal_pneumonia == 1L)),
-  pneumonia_case_hospitalizations = uniqueN(hospitalization_id),
-  pneumonia_case_pathways = paste(sort(unique(pneumonia_case_pathway)),
-                                   collapse = ";")
+diagnosis_summary_by_block <- diagnosis_encounters[, .(
+  qualifying_poa_pneumonia = as.integer(any(poa_pneumonia_case == 1L)),
+  pneumonia_primary = as.integer(any(poa_pneumonia_primary == 1L)),
+  pneumonia_case_hospitalizations = uniqueN(
+    hospitalization_id[poa_pneumonia_case == 1L]
+  ),
+  influenza_pneumonia_exclusion = as.integer(any(
+    influenza_pneumonia_present == 1L
+  )),
+  other_pneumonia_code_exclusion = as.integer(any(
+    explicitly_excluded_pneumonia_present == 1L
+  )),
+  pneumonia_case_pathways = "qualifying pneumonia code present on admission"
 ), by = hospital_block_id]
-pneumonia_code_summary <- diagnoses_classified[is_pneumonia_code == 1L, .(
+diagnosis_summary_by_block <- diagnosis_summary_by_block[
+  qualifying_poa_pneumonia == 1L & influenza_pneumonia_exclusion == 0L &
+    other_pneumonia_code_exclusion == 0L
+]
+pneumonia_code_summary <- diagnoses_classified[qualifies_poa_pneumonia == 1L, .(
   pneumonia_code_count = uniqueN(paste(
     diagnosis_code_format_clean, diagnosis_code_clean, sep = ":"
   )),
@@ -532,17 +548,14 @@ candidate_crosswalk <- hospital_block_crosswalk_all[
   hospital_block_id %in% diagnosis_candidate_blocks$hospital_block_id
 ]
 
-# ---- Respiratory-support episodes -------------------------------------------
+# ---- Respiratory-support initiation and time zero ----------------------------
 
-message("Constructing qualifying respiratory-support episodes...")
+message("Constructing respiratory-support initiation events...")
 respiratory <- read_filtered_clif(
-  paths[["respiratory_support"]],
-  "hospitalization_id",
+  paths[["respiratory_support"]], "hospitalization_id",
   unique(candidate_crosswalk$hospitalization_id),
-  c(
-    "hospitalization_id", "recorded_dttm", "device_category", "fio2_set",
-    "lpm_set", "tracheostomy"
-  )
+  c("hospitalization_id", "recorded_dttm", "device_category", "fio2_set",
+    "lpm_set", "tracheostomy")
 )
 respiratory[, `:=`(
   hospitalization_id = as.character(hospitalization_id),
@@ -570,219 +583,215 @@ resp[, `:=`(
     block_admission_dttm + support_data_days * 24 * 60 * 60
   )
 )]
-resp[
-  device_category_clean == "nasal_cannula" & lpm >= 20 & fio2 >= 0.30,
-  device_category_clean := "high_flow_nc"
-]
 resp <- resp[
   !is.na(recorded_dttm) & recorded_dttm >= block_admission_dttm &
     recorded_dttm <= support_window_end
 ]
-setorder(resp, hospital_block_id, device_category_clean, recorded_dttm)
-resp[, `:=`(
-  lpm_carried = nafill(nafill(lpm, type = "locf"), type = "nocb"),
-  fio2_carried = nafill(nafill(fio2, type = "locf"), type = "nocb")
-), by = .(hospital_block_id, device_category_clean)]
-resp[, qualifying_support := as.integer(
-  device_category_clean %in% c("imv", "nippv") |
-    (device_category_clean == "high_flow_nc" & lpm_carried >= hfnc_min_lpm)
-)]
 resp[, support_rank := fcase(
   device_category_clean == "imv", 3L,
   device_category_clean == "nippv", 2L,
   device_category_clean == "high_flow_nc", 1L,
   default = 0L
 )]
+resp[, qualifying_support := as.integer(support_rank > 0L)]
 
-# Resolve simultaneous device rows to the highest support state.
-support_state <- resp[
-  order(-qualifying_support, -support_rank), .SD[1L],
-  by = .(hospital_block_id, recorded_dttm)
-]
+# At a duplicated timestamp, retain the most intensive documented device.
+support_state <- resp[order(-support_rank), .SD[1L],
+                      by = .(hospital_block_id, recorded_dttm)]
 setorder(support_state, hospital_block_id, recorded_dttm)
-support_state[, previous_support := shift(qualifying_support, fill = 0L),
-              by = hospital_block_id]
-support_state[, support_episode_number := cumsum(
-  qualifying_support == 1L & previous_support == 0L
+support_state[, `:=`(
+  previous_device = shift(device_category_clean),
+  previous_support = shift(qualifying_support, fill = 0L),
+  next_dttm = shift(recorded_dttm, type = "lead")
 ), by = hospital_block_id]
-support_state[, next_dttm := shift(recorded_dttm, type = "lead"),
-              by = hospital_block_id]
 support_state[is.na(next_dttm), next_dttm := support_window_end]
 support_state[, interval_hours := pmax(
   0, as.numeric(difftime(next_dttm, recorded_dttm, units = "hours"))
 )]
-
-support_episodes <- support_state[
-  qualifying_support == 1L,
-  .(
-    respiratory_failure_start = min(recorded_dttm),
-    respiratory_support_duration_hours = sum(interval_hours),
-    respiratory_failure_stop = max(next_dttm),
-    episode_support_devices = paste(sort(unique(device_category_clean)),
-                                    collapse = ";")
-  ),
-  by = .(hospital_block_id, support_episode_number)
-]
-support_episodes <- merge(
-  support_episodes,
-  diagnosis_candidate_blocks[, .(hospital_block_id, admission_dttm)],
-  by = "hospital_block_id", all.x = TRUE, sort = FALSE
-)
-support_episodes <- support_episodes[
-  respiratory_support_duration_hours >= support_duration_hours &
-    respiratory_failure_start <= admission_dttm + support_start_days * 24 * 60 * 60
-]
-setorder(support_episodes, hospital_block_id, respiratory_failure_start)
-qualifying_episode <- support_episodes[, .SD[1L], by = hospital_block_id]
-qualifying_episode[, admission_dttm := NULL]
-if (!nrow(qualifying_episode)) {
-  stop("No blocks have a qualifying >=24-hour respiratory-support episode.")
-}
-
-# ---- First-24-hour respiratory exclusions and oxygenation -------------------
-
-message("Applying first-24-hour FiO2, tracheostomy, code-status, and P/F-S/F criteria...")
-resp_first24 <- merge(
-  resp, qualifying_episode[, .(hospital_block_id, respiratory_failure_start)],
-  by = "hospital_block_id", all = FALSE, sort = FALSE
-)
-resp_first24 <- resp_first24[
-  recorded_dttm >= respiratory_failure_start &
-    recorded_dttm <= respiratory_failure_start + oxygenation_window_hours * 60 * 60
-]
-fio2_records <- unique(resp_first24[
-  !is.na(fio2), .(hospital_block_id, fio2_dttm = recorded_dttm, fio2)
-])
-first24_support_summary <- resp_first24[, .(
-  fio2_documented_first24 = as.integer(any(!is.na(fio2))),
-  tracheostomy_first24 = as.integer(any(tracheostomy_binary == 1L)),
-  maximum_support_rank_first24 = max(support_rank, na.rm = TRUE)
+support_state[, support_episode_number := cumsum(
+  qualifying_support == 1L & previous_support == 0L
 ), by = hospital_block_id]
-first24_support_summary[, respiratory_support_category := fcase(
-  maximum_support_rank_first24 >= 3L, "imv",
-  maximum_support_rank_first24 == 2L, "nippv",
-  maximum_support_rank_first24 == 1L, "high_flow_nc",
-  default = NA_character_
+support_state[, initiation_event := as.integer(
+  qualifying_support == 1L &
+    (is.na(previous_device) | device_category_clean != previous_device)
 )]
 
-episode_windows <- merge(
-  qualifying_episode[, .(hospital_block_id, respiratory_failure_start)],
-  diagnosis_candidate_blocks[, .(hospital_block_id, patient_id)],
-  by = "hospital_block_id", all.x = TRUE, sort = FALSE
-)
+support_episode_summary <- support_state[qualifying_support == 1L, .(
+  respiratory_support_duration_hours = sum(interval_hours),
+  respiratory_failure_stop = max(next_dttm),
+  episode_support_devices = paste(sort(unique(device_category_clean)),
+                                  collapse = ";")
+), by = .(hospital_block_id, support_episode_number)]
 
-episode_crosswalk <- candidate_crosswalk[
-  hospital_block_id %in% qualifying_episode$hospital_block_id
+candidate_events <- support_state[
+  initiation_event == 1L &
+    recorded_dttm <= block_admission_dttm + support_start_days * 24 * 60 * 60,
+  .(
+    hospital_block_id, support_episode_number,
+    eligibility_dttm = recorded_dttm,
+    respiratory_support_category = device_category_clean,
+    tracheostomy_at_time_zero = tracheostomy_binary
+  )
+]
+setorder(candidate_events, hospital_block_id, eligibility_dttm)
+candidate_events[, eligibility_event_id := .I]
+if (!nrow(candidate_events)) {
+  stop("No IMV, NIPPV, or HFNO initiation events were observed.")
+}
+
+# Read baseline vitals and labs for candidate blocks. Measurements after time
+# zero are not used for shock exclusion; the symmetric window below is used
+# only to pair an HFNO initiation with contemporaneous SpO2 and FiO2.
+event_crosswalk <- candidate_crosswalk[
+  hospital_block_id %in% candidate_events$hospital_block_id
 ]
 vitals <- read_filtered_clif(
-  paths[["vitals"]],
-  "hospitalization_id",
-  unique(episode_crosswalk$hospitalization_id),
+  paths[["vitals"]], "hospitalization_id",
+  unique(event_crosswalk$hospitalization_id),
   c("hospitalization_id", "recorded_dttm", "vital_category", "vital_value")
 )
 vitals[, `:=`(
   hospitalization_id = as.character(hospitalization_id),
   recorded_dttm = as.POSIXct(recorded_dttm, tz = "UTC")
 )]
+vitals <- merge(
+  vitals, event_crosswalk[, .(hospitalization_id, hospital_block_id)],
+  by = "hospitalization_id", all = FALSE, sort = FALSE
+)
 labs <- read_filtered_clif(
-  paths[["labs"]],
-  "hospitalization_id",
-  unique(episode_crosswalk$hospitalization_id),
-  c(
-    "hospitalization_id", "lab_collect_dttm", "lab_category",
-    "lab_value_numeric"
-  )
+  paths[["labs"]], "hospitalization_id",
+  unique(event_crosswalk$hospitalization_id),
+  c("hospitalization_id", "lab_collect_dttm", "lab_category",
+    "lab_value_numeric")
 )
 labs[, `:=`(
   hospitalization_id = as.character(hospitalization_id),
   lab_collect_dttm = as.POSIXct(lab_collect_dttm, tz = "UTC")
 )]
-
-spo2 <- merge(
-  vitals[normalize_category(vital_category) == "spo2", .(
-    hospitalization_id,
-    measurement_dttm = recorded_dttm,
-    measurement_value = suppressWarnings(as.numeric(vital_value))
-  )],
-  candidate_crosswalk[, .(hospitalization_id, hospital_block_id)],
+labs <- merge(
+  labs, event_crosswalk[, .(hospitalization_id, hospital_block_id)],
   by = "hospitalization_id", all = FALSE, sort = FALSE
 )
-spo2 <- merge(spo2, qualifying_episode[, .(
-  hospital_block_id, respiratory_failure_start
-)], by = "hospital_block_id", all = FALSE, sort = FALSE)
-spo2 <- spo2[
-  measurement_dttm >= respiratory_failure_start &
-    measurement_dttm <= respiratory_failure_start + oxygenation_window_hours * 60 * 60 &
-    measurement_value >= spo2_min & measurement_value <= spo2_max_for_sf
-]
-sf_pairs <- pair_to_nearest_fio2(
-  spo2[, .(hospital_block_id, measurement_dttm, measurement_value)],
-  fio2_records, "spo2"
-)
-if (nrow(sf_pairs)) sf_pairs[, sf_ratio := spo2 / fio2]
 
-pao2 <- merge(
-  labs[normalize_category(lab_category) == "po2_arterial", .(
-    hospitalization_id,
-    measurement_dttm = lab_collect_dttm,
-    measurement_value = suppressWarnings(as.numeric(lab_value_numeric))
-  )],
-  candidate_crosswalk[, .(hospitalization_id, hospital_block_id)],
-  by = "hospitalization_id", all = FALSE, sort = FALSE
+hfno_events <- candidate_events[respiratory_support_category == "high_flow_nc"]
+hfno_fio2 <- data.table(
+  eligibility_event_id = integer(),
+  fio2_dttm = as.POSIXct(character()), fio2 = numeric()
 )
-pao2 <- merge(pao2, qualifying_episode[, .(
-  hospital_block_id, respiratory_failure_start
-)], by = "hospital_block_id", all = FALSE, sort = FALSE)
-pao2 <- pao2[
-  measurement_dttm >= respiratory_failure_start &
-    measurement_dttm <= respiratory_failure_start + oxygenation_window_hours * 60 * 60 &
-    measurement_value >= pao2_min & measurement_value <= pao2_max
-]
-pf_pairs <- pair_to_nearest_fio2(
-  pao2[, .(hospital_block_id, measurement_dttm, measurement_value)],
-  fio2_records, "pao2"
+hfno_spo2 <- data.table(
+  eligibility_event_id = integer(),
+  spo2_dttm = as.POSIXct(character()), spo2 = numeric()
 )
-if (nrow(pf_pairs)) {
-  pf_pairs[, pf_ratio := pao2 / fio2]
-  pf_pairs <- pf_pairs[pf_ratio < pf_max_exclusive]
+if (nrow(hfno_events)) {
+  hfno_fio2 <- merge(
+    hfno_events[, .(eligibility_event_id, hospital_block_id, eligibility_dttm)],
+    resp[device_category_clean == "high_flow_nc" & !is.na(fio2), .(
+      hospital_block_id, fio2_dttm = recorded_dttm, fio2
+    )],
+    by = "hospital_block_id", allow.cartesian = TRUE, sort = FALSE
+  )
+  hfno_fio2[, hours_from_event := abs(as.numeric(difftime(
+    fio2_dttm, eligibility_dttm, units = "hours"
+  )))]
+  hfno_fio2 <- hfno_fio2[
+    hours_from_event <= baseline_pairing_hours
+  ][order(eligibility_event_id, hours_from_event)][, .SD[1L],
+                                                by = eligibility_event_id]
+
+  hfno_spo2 <- merge(
+    hfno_events[, .(eligibility_event_id, hospital_block_id, eligibility_dttm)],
+    vitals[normalize_category(vital_category) == "spo2", .(
+      hospital_block_id, spo2_dttm = recorded_dttm,
+      spo2 = suppressWarnings(as.numeric(vital_value))
+    )],
+    by = "hospital_block_id", allow.cartesian = TRUE, sort = FALSE
+  )
+  hfno_spo2 <- hfno_spo2[spo2 >= spo2_min & spo2 <= spo2_max]
+  hfno_spo2[, hours_from_event := abs(as.numeric(difftime(
+    spo2_dttm, eligibility_dttm, units = "hours"
+  )))]
+  hfno_spo2 <- hfno_spo2[
+    hours_from_event <= baseline_pairing_hours
+  ][order(eligibility_event_id, hours_from_event)][, .SD[1L],
+                                                by = eligibility_event_id]
 }
 
-sf_summary <- if (nrow(sf_pairs)) sf_pairs[, .(
-  eligible_sf_measurements = .N,
-  sf_24_min = min(sf_ratio),
-  min_sf_spo2 = spo2[which.min(sf_ratio)],
-  min_sf_fio2 = fio2[which.min(sf_ratio)],
-  min_sf_dttm = measurement_dttm[which.min(sf_ratio)]
-), by = hospital_block_id] else data.table(hospital_block_id = character())
-pf_summary <- if (nrow(pf_pairs)) pf_pairs[, .(
-  eligible_pf_measurements = .N,
-  pf_24_min = min(pf_ratio),
-  min_pf_pao2 = pao2[which.min(pf_ratio)],
-  min_pf_fio2 = fio2[which.min(pf_ratio)],
-  min_pf_dttm = measurement_dttm[which.min(pf_ratio)]
-), by = hospital_block_id] else data.table(hospital_block_id = character())
-
-respiratory_eligibility <- Reduce(
-  function(x, y) merge(x, y, by = "hospital_block_id", all.x = TRUE,
-                       sort = FALSE),
-  list(qualifying_episode, first24_support_summary, sf_summary, pf_summary)
+hfno_baseline <- merge(
+  hfno_events,
+  hfno_fio2[, .(eligibility_event_id, fio2_dttm, fio2)],
+  by = "eligibility_event_id", all.x = TRUE, sort = FALSE
 )
-for (column in c("eligible_sf_measurements", "eligible_pf_measurements")) {
-  if (!column %in% names(respiratory_eligibility)) {
-    respiratory_eligibility[, (column) := 0L]
-  }
-  set(respiratory_eligibility, which(is.na(respiratory_eligibility[[column]])),
-      column, 0L)
-}
-respiratory_eligibility[, eligible_oxygenation := as.integer(
-  eligible_sf_measurements > 0L | eligible_pf_measurements > 0L
+hfno_baseline <- merge(
+  hfno_baseline,
+  hfno_spo2[, .(eligibility_event_id, spo2_dttm, spo2)],
+  by = "eligibility_event_id", all.x = TRUE, sort = FALSE
+)
+hfno_baseline[, `:=`(
+  sf_ratio = spo2 / fio2,
+  sf_fio2_pair_hours = abs(as.numeric(difftime(
+    spo2_dttm, fio2_dttm, units = "hours"
+  )))
+)]
+hfno_baseline[, hfno_eligible := as.integer(
+  !is.na(sf_ratio) & sf_ratio < hfno_sf_max_exclusive &
+    !is.na(fio2) & fio2 > hfno_fio2_min_exclusive &
+    !is.na(sf_fio2_pair_hours) & sf_fio2_pair_hours <= fio2_pairing_hours
 )]
 
-# Last DNI-equivalent status from seven days before through 24 hours after start.
+candidate_events[, respiratory_initiation_eligible := as.integer(
+  respiratory_support_category %in% c("imv", "nippv")
+)]
+if (nrow(hfno_baseline)) {
+  candidate_events[hfno_baseline, on = "eligibility_event_id", `:=`(
+    baseline_spo2 = i.spo2,
+    baseline_fio2 = i.fio2,
+    baseline_sf_ratio = i.sf_ratio,
+    respiratory_initiation_eligible = i.hfno_eligible
+  )]
+}
+qualifying_events <- candidate_events[respiratory_initiation_eligible == 1L]
+setorder(qualifying_events, hospital_block_id, eligibility_dttm)
+qualifying_episode <- qualifying_events[, .SD[1L], by = hospital_block_id]
+qualifying_episode <- merge(
+  qualifying_episode, support_episode_summary,
+  by = c("hospital_block_id", "support_episode_number"),
+  all.x = TRUE, sort = FALSE
+)
+qualifying_episode[, `:=`(
+  respiratory_failure_start = eligibility_dttm,
+  sf_24_min = baseline_sf_ratio,
+  pf_24_min = NA_real_
+)]
+if (!nrow(qualifying_episode)) {
+  stop("No blocks meet the initiation-based respiratory eligibility rule.")
+}
+
+sf_pairs <- qualifying_episode[
+  respiratory_support_category == "high_flow_nc",
+  .(
+    hospital_block_id, eligibility_event_id,
+    measurement_dttm = eligibility_dttm,
+    spo2 = baseline_spo2, fio2 = baseline_fio2,
+    sf_ratio = baseline_sf_ratio
+  )
+]
+pf_pairs <- data.table(
+  hospital_block_id = character(), measurement_dttm = as.POSIXct(character()),
+  pao2 = numeric(), fio2 = numeric(), pf_ratio = numeric()
+)
+
+# ---- Code status and concurrent shock exclusions at time zero ---------------
+
+episode_windows <- merge(
+  qualifying_episode[, .(hospital_block_id, respiratory_failure_start,
+                          respiratory_support_category)],
+  diagnosis_candidate_blocks[, .(hospital_block_id, patient_id)],
+  by = "hospital_block_id", all.x = TRUE, sort = FALSE
+)
+
+# Last code status documented during the prior seven days, through time zero.
 code_status <- read_filtered_clif(
-  paths[["code_status"]],
-  "patient_id",
-  unique(episode_windows$patient_id),
+  paths[["code_status"]], "patient_id", unique(episode_windows$patient_id),
   c("patient_id", "start_dttm", "code_status_category")
 )
 code_status[, `:=`(
@@ -795,7 +804,7 @@ status_candidates <- merge(
 )
 status_candidates <- status_candidates[
   start_dttm >= respiratory_failure_start - 7 * 24 * 60 * 60 &
-    start_dttm <= respiratory_failure_start + 24 * 60 * 60
+    start_dttm <= respiratory_failure_start
 ]
 setorder(status_candidates, hospital_block_id, start_dttm)
 status_summary <- status_candidates[, .(
@@ -805,18 +814,167 @@ status_summary <- status_candidates[, .(
 ), by = hospital_block_id]
 status_summary[, limited_code_status := as.integer(
   normalize_category(code_status_category_eligibility) %in%
-    c("and", "dnr_dni", "dnar_dni")
+    c("and", "dnr", "dni", "dnar", "dnr_dni", "dnar_dni")
 )]
-respiratory_eligibility <- merge(
-  respiratory_eligibility, status_summary,
+
+# Most recent lactate at or before time zero within the agreed six-hour window.
+lactate_candidates <- merge(
+  labs[normalize_category(lab_category) == "lactate", .(
+    hospital_block_id, lactate_dttm = lab_collect_dttm,
+    lactate_value = suppressWarnings(as.numeric(lab_value_numeric))
+  )],
+  episode_windows[, .(hospital_block_id, respiratory_failure_start)],
+  by = "hospital_block_id", allow.cartesian = TRUE, sort = FALSE
+)
+lactate_candidates <- lactate_candidates[
+  lactate_dttm <= respiratory_failure_start &
+    lactate_dttm >= respiratory_failure_start - lactate_lookback_hours * 60 * 60 &
+    is.finite(lactate_value)
+]
+setorder(lactate_candidates, hospital_block_id, -lactate_dttm)
+lactate_summary <- lactate_candidates[, .SD[1L], by = hospital_block_id]
+
+# Most recent pre-baseline weight permits conversion of non-weight-normalized
+# catecholamine rates. Unsupported or missing units are retained as an explicit
+# indeterminate-dose diagnostic rather than treated as evidence of shock.
+weight_candidates <- merge(
+  vitals[normalize_category(vital_category) == "weight_kg", .(
+    hospital_block_id, weight_dttm = recorded_dttm,
+    weight_kg = suppressWarnings(as.numeric(vital_value))
+  )],
+  episode_windows[, .(hospital_block_id, respiratory_failure_start)],
+  by = "hospital_block_id", allow.cartesian = TRUE, sort = FALSE
+)
+weight_candidates <- weight_candidates[
+  weight_dttm <= respiratory_failure_start &
+    weight_dttm >= respiratory_failure_start - weight_lookback_hours * 60 * 60 &
+    weight_kg > 20 & weight_kg < 400
+]
+setorder(weight_candidates, hospital_block_id, -weight_dttm)
+weight_summary <- weight_candidates[, .SD[1L], by = hospital_block_id]
+
+continuous_schema <- open_dataset(paths[["continuous_medication"]])$schema$names
+pressor_columns <- intersect(c(
+  "hospitalization_id", "admin_dttm", "med_category", "med_dose",
+  "med_dose_unit", "mar_action_category", "mar_action_name"
+), continuous_schema)
+pressor <- read_filtered_clif(
+  paths[["continuous_medication"]], "hospitalization_id",
+  unique(event_crosswalk$hospitalization_id), pressor_columns
+)
+if (!"mar_action_name" %in% names(pressor)) pressor[, mar_action_name := NA_character_]
+pressor[, `:=`(
+  hospitalization_id = as.character(hospitalization_id),
+  admin_dttm = as.POSIXct(admin_dttm, tz = "UTC"),
+  med_category_clean = normalize_category(med_category),
+  med_dose_numeric = suppressWarnings(as.numeric(med_dose)),
+  med_dose_unit_clean = gsub(
+    "[^a-z]", "", tolower(gsub("μ", "u", as.character(med_dose_unit), fixed = TRUE))
+  ),
+  action_clean = normalize_category(fifelse(
+    !is.na(mar_action_category), mar_action_category, mar_action_name
+  ))
+)]
+pressor <- pressor[med_category_clean %in%
+                     c("norepinephrine", "epinephrine", "vasopressin")]
+pressor <- merge(
+  pressor, event_crosswalk[, .(hospitalization_id, hospital_block_id)],
+  by = "hospitalization_id", all = FALSE, sort = FALSE
+)
+pressor <- merge(
+  pressor, episode_windows[, .(hospital_block_id, respiratory_failure_start)],
+  by = "hospital_block_id", allow.cartesian = TRUE, sort = FALSE
+)
+pressor <- pressor[
+  admin_dttm <= respiratory_failure_start &
+    admin_dttm >= respiratory_failure_start - shock_lookback_hours * 60 * 60
+]
+setorder(pressor, hospital_block_id, med_category_clean, -admin_dttm)
+pressor <- pressor[, .SD[1L], by = .(hospital_block_id, med_category_clean)]
+pressor[, pressor_active := as.integer(
+  !grepl("stop|discontinu|hold|held|pause|cancel|not_given", action_clean)
+)]
+pressor <- merge(
+  pressor, weight_summary[, .(hospital_block_id, weight_kg)],
   by = "hospital_block_id", all.x = TRUE, sort = FALSE
 )
-respiratory_eligibility[is.na(limited_code_status), limited_code_status := 0L]
+pressor[, dose_mcg_kg_min := fcase(
+  med_dose_unit_clean %in% c("mcgkgmin", "ugkgmin", "microgramkgmin"),
+    med_dose_numeric,
+  med_dose_unit_clean %in% c("mgkgmin", "milligramkgmin"),
+    med_dose_numeric * 1000,
+  med_dose_unit_clean %in% c("mcgkghr", "ugkghr", "microgramkghr"),
+    med_dose_numeric / 60,
+  med_dose_unit_clean %in% c("mcgmin", "ugmin", "microgrammin") &
+    is.finite(weight_kg), med_dose_numeric / weight_kg,
+  med_dose_unit_clean %in% c("mghr", "milligramhr") & is.finite(weight_kg),
+    med_dose_numeric * 1000 / 60 / weight_kg,
+  med_dose_unit_clean %in% c("mcghr", "ughr", "microgramhr") &
+    is.finite(weight_kg), med_dose_numeric / 60 / weight_kg,
+  default = NA_real_
+)]
+
+safe_max <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x)) max(x) else NA_real_
+}
+pressor_summary <- pressor[, .(
+  active_norepinephrine_or_epinephrine = as.integer(any(
+    pressor_active == 1L & med_category_clean %in%
+      c("norepinephrine", "epinephrine")
+  )),
+  active_vasopressin = as.integer(any(
+    pressor_active == 1L & med_category_clean == "vasopressin"
+  )),
+  max_catecholamine_dose_mcg_kg_min = safe_max(
+    dose_mcg_kg_min[pressor_active == 1L & med_category_clean %in%
+                      c("norepinephrine", "epinephrine")]
+  ),
+  catecholamine_dose_indeterminate = as.integer(any(
+    pressor_active == 1L & med_category_clean %in%
+      c("norepinephrine", "epinephrine") & !is.finite(dose_mcg_kg_min)
+  ))
+), by = hospital_block_id]
+
+respiratory_eligibility <- Reduce(
+  function(x, y) merge(x, y, by = "hospital_block_id", all.x = TRUE,
+                       sort = FALSE),
+  list(qualifying_episode, status_summary,
+       lactate_summary[, .(hospital_block_id, lactate_dttm, lactate_value)],
+       weight_summary[, .(hospital_block_id, weight_dttm, weight_kg)],
+       pressor_summary)
+)
+for (column in c("limited_code_status", "active_norepinephrine_or_epinephrine",
+                 "active_vasopressin", "catecholamine_dose_indeterminate")) {
+  if (!column %in% names(respiratory_eligibility)) {
+    respiratory_eligibility[, (column) := 0L]
+  }
+  respiratory_eligibility[is.na(get(column)), (column) := 0L]
+}
+respiratory_eligibility[, `:=`(
+  exclude_pressor_niv_hfno = as.integer(
+    respiratory_support_category %in% c("nippv", "high_flow_nc") &
+      active_norepinephrine_or_epinephrine == 1L
+  ),
+  exclude_high_dose_pressor_imv = as.integer(
+    respiratory_support_category == "imv" &
+      is.finite(max_catecholamine_dose_mcg_kg_min) &
+      max_catecholamine_dose_mcg_kg_min >= high_dose_pressor_threshold
+  ),
+  exclude_vasopressin = as.integer(active_vasopressin == 1L),
+  exclude_high_lactate = as.integer(
+    is.finite(lactate_value) & lactate_value >= lactate_exclusion_threshold
+  ),
+  lactate_missing_at_baseline = as.integer(!is.finite(lactate_value))
+)]
+respiratory_eligibility[, concurrent_shock_exclusion := as.integer(
+  exclude_pressor_niv_hfno == 1L |
+    exclude_high_dose_pressor_imv == 1L |
+    exclude_vasopressin == 1L |
+    exclude_high_lactate == 1L
+)]
 respiratory_eligibility[, respiratory_eligible := as.integer(
-  fio2_documented_first24 == 1L &
-    tracheostomy_first24 == 0L &
-    limited_code_status == 0L &
-    eligible_oxygenation == 1L
+  limited_code_status == 0L & concurrent_shock_exclusion == 0L
 )]
 
 # ---- Final eligibility and one block per patient ----------------------------
@@ -932,20 +1090,28 @@ count_blocks <- function(block_ids) {
 }
 
 episode_blocks <- unique(qualifying_episode$hospital_block_id)
-fio2_blocks <- respiratory_eligibility[fio2_documented_first24 == 1L,
-                                       hospital_block_id]
-no_trach_blocks <- respiratory_eligibility[
-  fio2_documented_first24 == 1L & tracheostomy_first24 == 0L,
-  hospital_block_id
-]
 code_status_blocks <- respiratory_eligibility[
-  fio2_documented_first24 == 1L & tracheostomy_first24 == 0L &
-    limited_code_status == 0L,
+  limited_code_status == 0L,
   hospital_block_id
 ]
-oxygenation_blocks <- respiratory_eligibility[
-  fio2_documented_first24 == 1L & tracheostomy_first24 == 0L &
-    limited_code_status == 0L & eligible_oxygenation == 1L,
+no_pressor_niv_blocks <- respiratory_eligibility[
+  limited_code_status == 0L & exclude_pressor_niv_hfno == 0L,
+  hospital_block_id
+]
+no_high_dose_imv_blocks <- respiratory_eligibility[
+  limited_code_status == 0L & exclude_pressor_niv_hfno == 0L &
+    exclude_high_dose_pressor_imv == 0L,
+  hospital_block_id
+]
+no_vasopressin_blocks <- respiratory_eligibility[
+  limited_code_status == 0L & exclude_pressor_niv_hfno == 0L &
+    exclude_high_dose_pressor_imv == 0L & exclude_vasopressin == 0L,
+  hospital_block_id
+]
+no_high_lactate_blocks <- respiratory_eligibility[
+  limited_code_status == 0L & exclude_pressor_niv_hfno == 0L &
+    exclude_high_dose_pressor_imv == 0L & exclude_vasopressin == 0L &
+    exclude_high_lactate == 0L,
   hospital_block_id
 ]
 
@@ -964,19 +1130,28 @@ attrition <- rbindlist(list(
         count_blocks(adult_blocks$hospital_block_id)),
   cbind(data.table(step = "Adult blocks with admission_type_category == ed"),
         count_blocks(ed_blocks$hospital_block_id)),
-  cbind(data.table(step = paste0("ED adult blocks meeting ", case_definition,
-                                 " pneumonia coding definition")),
+  cbind(data.table(step = paste0(
+    "ED adult blocks with qualifying ICD-10-CM pneumonia present on admission"
+  )),
         count_blocks(diagnosis_candidate_blocks$hospital_block_id)),
-  cbind(data.table(step = "Blocks with qualifying >=24-hour respiratory-support episode"),
+  cbind(data.table(step = paste0(
+    "Blocks meeting initiation criterion: IMV/NIPPV or HFNO with S/F <",
+    hfno_sf_max_exclusive, " and FiO2 >", hfno_fio2_min_exclusive
+  )),
         count_blocks(episode_blocks)),
-  cbind(data.table(step = "Blocks with FiO2 documented in first episode day"),
-        count_blocks(fio2_blocks)),
-  cbind(data.table(step = "Blocks without tracheostomy in first episode day"),
-        count_blocks(no_trach_blocks)),
-  cbind(data.table(step = "Blocks without DNI-equivalent status"),
+  cbind(data.table(step = "Blocks without DNR/DNI-equivalent status at time zero"),
         count_blocks(code_status_blocks)),
-  cbind(data.table(step = "Blocks with eligible P/F or S/F measurement"),
-        count_blocks(oxygenation_blocks)),
+  cbind(data.table(step = "Blocks without norepinephrine/epinephrine on NIPPV/HFNO"),
+        count_blocks(no_pressor_niv_blocks)),
+  cbind(data.table(step = paste0(
+    "Blocks without norepinephrine/epinephrine >=",
+    high_dose_pressor_threshold, " mcg/kg/min on IMV"
+  )), count_blocks(no_high_dose_imv_blocks)),
+  cbind(data.table(step = "Blocks without active vasopressin at time zero"),
+        count_blocks(no_vasopressin_blocks)),
+  cbind(data.table(step = paste0("Blocks without lactate >=",
+                                 lactate_exclusion_threshold, " mmol/L")),
+        count_blocks(no_high_lactate_blocks)),
   cbind(data.table(step = "Final cohort: one randomly selected eligible block per patient"),
         count_blocks(cohort$hospital_block_id))
 ), use.names = TRUE, fill = TRUE)
@@ -996,11 +1171,15 @@ design_summary <- data.table(
     "cohort_unit", "hospital_block_gap_hours",
     "running_block_end_algorithm",
     "age_minimum", "age_maximum_exclusive", "admission_type_category",
-    "pneumonia_case_definition", "support_devices", "hfnc_min_lpm",
-    "support_duration_hours", "support_start_days", "oxygenation_window_hours",
-    "fio2_pairing_hours", "fio2_range", "spo2_range_for_sf",
-    "pao2_range_for_pf", "pf_max_exclusive", "exclude_tracheostomy_first24",
-    "exclude_dni_equivalent", "one_eligible_block_per_patient",
+    "pneumonia_case_definition", "qualifying_icd10_families",
+    "pneumonia_must_be_present_on_admission", "pneumonia_diagnosis_position",
+    "support_devices", "support_start_days", "baseline_pairing_hours",
+    "hfno_sf_max_exclusive", "hfno_fio2_min_exclusive",
+    "future_support_duration_required", "exclude_dni_equivalent_at_time_zero",
+    "shock_lookback_hours", "lactate_lookback_hours",
+    "imv_catecholamine_threshold_mcg_kg_min", "lactate_threshold_mmol_l",
+    "active_pressor_definition", "influenza_exclusion_source",
+    "missing_shock_data_policy", "one_eligible_block_per_patient",
     "selection_seed", "duplicate_hospitalization_rows_beyond_first",
     "eligible_blocks_before_patient_selection", "final_blocks", "final_patients"
   ),
@@ -1012,33 +1191,31 @@ design_summary <- data.table(
     ])), collapse = ";"),
     "hospital_block", block_gap_hours, TRUE,
     age_min, age_max_exclusive, "ed",
-    case_definition, "imv;nippv;high_flow_nc", hfnc_min_lpm,
-    support_duration_hours, support_start_days, oxygenation_window_hours,
-    fio2_pairing_hours, "0.21-1.00", "80-97", "40-700", pf_max_exclusive,
-    TRUE, TRUE, TRUE, selection_seed, duplicate_hospitalization_rows,
+    case_definition, "J12.*;J13-J16.*;J18.*", TRUE, "any",
+    "imv;nippv;high_flow_nc", support_start_days, baseline_pairing_hours,
+    hfno_sf_max_exclusive, hfno_fio2_min_exclusive,
+    FALSE, TRUE, shock_lookback_hours, lactate_lookback_hours,
+    high_dose_pressor_threshold, lactate_exclusion_threshold,
+    "most recent continuous-medication record in prior lookback window",
+    "present-on-admission ICD-10-CM J09-J11",
+    "retain and flag when no exclusion evidence is observed",
+    TRUE, selection_seed, duplicate_hospitalization_rows,
     nrow(eligible_blocks), nrow(cohort), uniqueN(cohort$patient_id)
   ))
 )
 
 icd_definition <- data.table(
-  code_system = c("ICD-9-CM", "ICD-9-CM", "ICD-9-CM",
-                  "ICD-10-CM", "ICD-10-CM", "ICD-10-CM"),
-  concept = rep(c("pneumonia", "sepsis", "respiratory failure"), 2),
-  included_codes = c(
-    "481;482;483;485;486",
-    "038;995.91;995.92;785.52",
-    "518.81;518.82;518.84;799.1",
-    "J13-J16;J18",
-    "A40;A41;R65.20;R65.21",
-    "J80;J96.0;J96.2;J96.9;R09.2"
+  code_system = "ICD-10-CM",
+  qualifying_codes = "J12.*;J13-J16.*;J18.*",
+  required_poa_present = TRUE,
+  diagnosis_position = "any",
+  nonqualifying_or_excluded_codes = paste(
+    "J09-J11 influenza;J17 pneumonia in diseases classified elsewhere;",
+    "J69 aspiration;J95.851 ventilator-associated pneumonia"
   ),
-  role_in_default_definition = c(
-    "principal, or secondary with principal sepsis/respiratory failure",
-    "principal with secondary pneumonia",
-    "principal with secondary pneumonia",
-    "principal, or secondary with principal sepsis/respiratory failure",
-    "principal with secondary pneumonia",
-    "principal with secondary pneumonia"
+  note = paste(
+    "U07.1 and organism/sepsis codes do not qualify without a qualifying",
+    "pneumonia diagnosis; J12.82 is included through J12.*"
   )
 )
 
@@ -1054,7 +1231,7 @@ output_paths <- c(
   all_crosswalk = file.path(output_dir, "hospital_block_crosswalk_all.parquet"),
   diagnoses_parquet = file.path(output_dir, "adult_pneumonia_diagnoses.parquet"),
   all_diagnoses_parquet = file.path(output_dir,
-    "all_classified_pneumonia_sepsis_respiratory_diagnoses.parquet"),
+    "all_classified_pneumonia_diagnoses.parquet"),
   respiratory_eligibility = file.path(output_dir,
     "adult_pneumonia_respiratory_eligibility.parquet"),
   sf_pairs = file.path(output_dir, "adult_pneumonia_eligible_sf_pairs.parquet"),

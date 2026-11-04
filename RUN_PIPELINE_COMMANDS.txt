@@ -1,0 +1,80 @@
+# Hopkins CLIF severe-CAP target-trial cohort workflow
+# Run on the Discovery HPC. Patient-level outputs must remain on Discovery.
+
+# 1. Enter the project directory.
+cd /projects/emulate_icu/CLIF-Cohort
+
+# 2. Define source and output locations.
+# Shell variable assignments cannot contain spaces around the equals sign.
+export CLIF_DATA_DIR=/projects/emulate_icu/rclif_2_1
+export COHORT_OUTPUT_DIR=./output
+export INPUT_CHECK_DIR=./input_check
+export GLUCOCORTICOID_CHECK_DIR=./glucocorticoid_source_check
+export STEROID_CANDIDATE_DIR=./steroid_candidates
+export STEROID_TREATMENT_DIR=./steroid_treatment
+export SUMMARY_EDA_DIR=./summary_eda
+
+# 3. Reproducibility parameters.
+export PNEUMONIA_CASE_DEFINITION=poa_any
+export HOSPITAL_BLOCK_GAP_HOURS=6
+export COHORT_SELECTION_SEED=32284
+export CLIF_SITE_ID=hopkins_unspecified
+export TREATMENT_GRACE_HOURS=24
+export SUMMARY_SMALL_CELL_THRESHOLD=10
+
+# 4. Validate files, schemas, category values, POA, lactate, and pressors.
+Rscript 00_check_clif_cohort_inputs.R \
+  "$CLIF_DATA_DIR" \
+  "$INPUT_CHECK_DIR"
+
+# 5. Build the initiation-based severe-CAP cohort.
+Rscript 01_build_adult_pneumonia_cohort.R \
+  "$CLIF_DATA_DIR" \
+  "$COHORT_OUTPUT_DIR" \
+  "$PNEUMONIA_CASE_DEFINITION" \
+  "$HOSPITAL_BLOCK_GAP_HOURS" \
+  "$COHORT_SELECTION_SEED" \
+  "$CLIF_SITE_ID"
+
+# 6. Profile glucocorticoid source fields and categories.
+Rscript 02_profile_glucocorticoid_sources.R \
+  "$CLIF_DATA_DIR" \
+  "$GLUCOCORTICOID_CHECK_DIR"
+
+# 7. Extract systemic steroid candidates linked to the final cohort.
+Rscript 03_extract_candidate_steroid_administrations.R \
+  "$CLIF_DATA_DIR" \
+  "$COHORT_OUTPUT_DIR" \
+  "$STEROID_CANDIDATE_DIR"
+
+# 8. Apply drug-, dose-, route-, and 24-hour grace-period rules.
+Rscript 04_define_steroid_treatment.R \
+  "$STEROID_CANDIDATE_DIR" \
+  "$COHORT_OUTPUT_DIR" \
+  "$STEROID_TREATMENT_DIR" \
+  "$TREATMENT_GRACE_HOURS"
+
+# 9. Produce disclosure-controlled aggregate summaries and figures.
+# This form lets the EDA script infer and report a provisional data cutoff.
+Rscript 05_cohort_summary_eda.R \
+  "$CLIF_DATA_DIR" \
+  "$COHORT_OUTPUT_DIR" \
+  "$STEROID_TREATMENT_DIR" \
+  "$SUMMARY_EDA_DIR" \
+  "$SUMMARY_SMALL_CELL_THRESHOLD"
+
+# Preferred alternative after the exact extraction cutoff is confirmed:
+# export DATA_CUTOFF_DATE=2026-09-DD
+# Rscript 05_cohort_summary_eda.R \
+#   "$CLIF_DATA_DIR" \
+#   "$COHORT_OUTPUT_DIR" \
+#   "$STEROID_TREATMENT_DIR" \
+#   "$SUMMARY_EDA_DIR" \
+#   "$SUMMARY_SMALL_CELL_THRESHOLD" \
+#   "$DATA_CUTOFF_DATE"
+
+# 10. Review aggregate outputs that may be moved only after disclosure review.
+# Patient-level parquet/CSV files in output, steroid_candidates, and
+# steroid_treatment must remain on the approved Discovery HPC.
+ls -lh "$INPUT_CHECK_DIR"
+ls -lh "$SUMMARY_EDA_DIR"
