@@ -17,6 +17,7 @@
 #   6. no concurrent shock proxy at time zero: any norepinephrine/epinephrine
 #      on NIPPV/HFNO, norepinephrine/epinephrine >=0.25 mcg/kg/min on IMV,
 #      any vasopressin, or lactate >=4 mmol/L
+#   7. no recorded death before time zero
 #
 # Usage:
 #   Rscript 01_build_adult_pneumonia_cohort.R \
@@ -62,7 +63,7 @@ if (!nzchar(data_dir)) {
   )
 }
 output_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
-  file.path(script_dir, "output")
+  file.path(script_dir, "pipeline_output", "sensitive", "cohort")
 
 case_definition <- if (length(args) >= 3L && nzchar(args[3L])) args[3L] else
   Sys.getenv("PNEUMONIA_CASE_DEFINITION", unset = "poa_any")
@@ -124,6 +125,7 @@ high_dose_pressor_threshold <- 0.25
 lactate_exclusion_threshold <- 4
 
 paths <- c(
+  patient = file.path(data_dir, "clif_patient.parquet"),
   hospitalization = file.path(data_dir, "clif_hospitalization.parquet"),
   diagnosis = file.path(data_dir, "clif_hospital_diagnosis.parquet"),
   respiratory_support = file.path(data_dir, "clif_respiratory_support.parquet"),
@@ -789,6 +791,32 @@ episode_windows <- merge(
   by = "hospital_block_id", all.x = TRUE, sort = FALSE
 )
 
+# Exclude patients whose recorded death precedes time zero. This check belongs
+# in cohort construction so impossible temporal records cannot enter treatment
+# assignment or downstream target-trial analyses.
+patient_death <- read_filtered_clif(
+  paths[["patient"]], "patient_id", unique(episode_windows$patient_id),
+  c("patient_id", "death_dttm")
+)
+patient_death[, `:=`(
+  patient_id = as.character(patient_id),
+  death_dttm = as.POSIXct(death_dttm, tz = "UTC")
+)]
+patient_death <- patient_death[, .(
+  death_dttm = if (any(!is.na(death_dttm))) {
+    min(death_dttm, na.rm = TRUE)
+  } else as.POSIXct(NA, tz = "UTC")
+), by = patient_id]
+death_timing <- merge(
+  episode_windows[, .(hospital_block_id, patient_id,
+                       respiratory_failure_start)],
+  patient_death,
+  by = "patient_id", all.x = TRUE, sort = FALSE
+)
+death_timing[, death_before_time_zero := as.integer(
+  !is.na(death_dttm) & death_dttm < respiratory_failure_start
+)]
+
 # Last code status documented during the prior seven days, through time zero.
 code_status <- read_filtered_clif(
   paths[["code_status"]], "patient_id", unique(episode_windows$patient_id),
@@ -940,11 +968,13 @@ respiratory_eligibility <- Reduce(
   function(x, y) merge(x, y, by = "hospital_block_id", all.x = TRUE,
                        sort = FALSE),
   list(qualifying_episode, status_summary,
+       death_timing[, .(hospital_block_id, death_before_time_zero)],
        lactate_summary[, .(hospital_block_id, lactate_dttm, lactate_value)],
        weight_summary[, .(hospital_block_id, weight_dttm, weight_kg)],
        pressor_summary)
 )
-for (column in c("limited_code_status", "active_norepinephrine_or_epinephrine",
+for (column in c("death_before_time_zero", "limited_code_status",
+                 "active_norepinephrine_or_epinephrine",
                  "active_vasopressin", "catecholamine_dose_indeterminate")) {
   if (!column %in% names(respiratory_eligibility)) {
     respiratory_eligibility[, (column) := 0L]
@@ -974,7 +1004,8 @@ respiratory_eligibility[, concurrent_shock_exclusion := as.integer(
     exclude_high_lactate == 1L
 )]
 respiratory_eligibility[, respiratory_eligible := as.integer(
-  limited_code_status == 0L & concurrent_shock_exclusion == 0L
+  death_before_time_zero == 0L & limited_code_status == 0L &
+    concurrent_shock_exclusion == 0L
 )]
 
 # ---- Final eligibility and one block per patient ----------------------------
@@ -1090,26 +1121,34 @@ count_blocks <- function(block_ids) {
 }
 
 episode_blocks <- unique(qualifying_episode$hospital_block_id)
+alive_at_time_zero_blocks <- respiratory_eligibility[
+  death_before_time_zero == 0L,
+  hospital_block_id
+]
 code_status_blocks <- respiratory_eligibility[
-  limited_code_status == 0L,
+  death_before_time_zero == 0L & limited_code_status == 0L,
   hospital_block_id
 ]
 no_pressor_niv_blocks <- respiratory_eligibility[
-  limited_code_status == 0L & exclude_pressor_niv_hfno == 0L,
+  death_before_time_zero == 0L & limited_code_status == 0L &
+    exclude_pressor_niv_hfno == 0L,
   hospital_block_id
 ]
 no_high_dose_imv_blocks <- respiratory_eligibility[
-  limited_code_status == 0L & exclude_pressor_niv_hfno == 0L &
+  death_before_time_zero == 0L & limited_code_status == 0L &
+    exclude_pressor_niv_hfno == 0L &
     exclude_high_dose_pressor_imv == 0L,
   hospital_block_id
 ]
 no_vasopressin_blocks <- respiratory_eligibility[
-  limited_code_status == 0L & exclude_pressor_niv_hfno == 0L &
+  death_before_time_zero == 0L & limited_code_status == 0L &
+    exclude_pressor_niv_hfno == 0L &
     exclude_high_dose_pressor_imv == 0L & exclude_vasopressin == 0L,
   hospital_block_id
 ]
 no_high_lactate_blocks <- respiratory_eligibility[
-  limited_code_status == 0L & exclude_pressor_niv_hfno == 0L &
+  death_before_time_zero == 0L & limited_code_status == 0L &
+    exclude_pressor_niv_hfno == 0L &
     exclude_high_dose_pressor_imv == 0L & exclude_vasopressin == 0L &
     exclude_high_lactate == 0L,
   hospital_block_id
@@ -1139,6 +1178,8 @@ attrition <- rbindlist(list(
     hfno_sf_max_exclusive, " and FiO2 >", hfno_fio2_min_exclusive
   )),
         count_blocks(episode_blocks)),
+  cbind(data.table(step = "Blocks without recorded death before time zero"),
+        count_blocks(alive_at_time_zero_blocks)),
   cbind(data.table(step = "Blocks without DNR/DNI-equivalent status at time zero"),
         count_blocks(code_status_blocks)),
   cbind(data.table(step = "Blocks without norepinephrine/epinephrine on NIPPV/HFNO"),
@@ -1175,7 +1216,8 @@ design_summary <- data.table(
     "pneumonia_must_be_present_on_admission", "pneumonia_diagnosis_position",
     "support_devices", "support_start_days", "baseline_pairing_hours",
     "hfno_sf_max_exclusive", "hfno_fio2_min_exclusive",
-    "future_support_duration_required", "exclude_dni_equivalent_at_time_zero",
+    "future_support_duration_required", "exclude_death_before_time_zero",
+    "exclude_dni_equivalent_at_time_zero",
     "shock_lookback_hours", "lactate_lookback_hours",
     "imv_catecholamine_threshold_mcg_kg_min", "lactate_threshold_mmol_l",
     "active_pressor_definition", "influenza_exclusion_source",
@@ -1194,7 +1236,7 @@ design_summary <- data.table(
     case_definition, "J12.*;J13-J16.*;J18.*", TRUE, "any",
     "imv;nippv;high_flow_nc", support_start_days, baseline_pairing_hours,
     hfno_sf_max_exclusive, hfno_fio2_min_exclusive,
-    FALSE, TRUE, shock_lookback_hours, lactate_lookback_hours,
+    FALSE, TRUE, TRUE, shock_lookback_hours, lactate_lookback_hours,
     high_dose_pressor_threshold, lactate_exclusion_threshold,
     "most recent continuous-medication record in prior lookback window",
     "present-on-admission ICD-10-CM J09-J11",

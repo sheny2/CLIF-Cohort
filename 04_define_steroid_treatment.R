@@ -27,11 +27,11 @@ script_dir <- if (length(script_file)) {
 } else normalizePath(getwd())
 
 candidate_dir <- if (length(args) >= 1L && nzchar(args[1L])) args[1L] else
-  file.path(script_dir, "steroid_candidates")
+  file.path(script_dir, "pipeline_output", "sensitive", "steroid_candidates")
 cohort_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
-  file.path(script_dir, "output")
+  file.path(script_dir, "pipeline_output", "sensitive", "cohort")
 output_dir <- if (length(args) >= 3L && nzchar(args[3L])) args[3L] else
-  file.path(script_dir, "steroid_treatment")
+  file.path(script_dir, "pipeline_output", "sensitive", "steroid_treatment")
 grace_text <- if (length(args) >= 4L && nzchar(args[4L])) args[4L] else
   Sys.getenv("TREATMENT_GRACE_HOURS", unset = "")
 grace_hours <- if (nzchar(grace_text)) suppressWarnings(as.numeric(grace_text)) else

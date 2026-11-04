@@ -31,10 +31,13 @@ script_dir <- if (length(script_file)) {
   dirname(normalizePath(sub("^--file=", "", script_file[1L])))
 } else normalizePath(getwd())
 output_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
-  file.path(script_dir, "input_check")
+  file.path(script_dir, "pipeline_output", "sensitive", "input_checks")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 requirements <- list(
+  clif_patient.parquet = c(
+    "patient_id", "death_dttm"
+  ),
   clif_hospitalization.parquet = c(
     "hospitalization_id", "patient_id", "admission_dttm", "discharge_dttm",
     "age_at_admission", "admission_type_category"

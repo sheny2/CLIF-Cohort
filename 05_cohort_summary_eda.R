@@ -28,11 +28,11 @@ script_dir <- if (length(script_file)) {
 data_dir <- if (length(args) >= 1L && nzchar(args[1L])) args[1L] else
   Sys.getenv("CLIF_DATA_DIR", unset = "")
 cohort_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
-  file.path(script_dir, "output")
+  file.path(script_dir, "pipeline_output", "sensitive", "cohort")
 treatment_dir <- if (length(args) >= 3L && nzchar(args[3L])) args[3L] else
-  file.path(script_dir, "steroid_treatment")
+  file.path(script_dir, "pipeline_output", "sensitive", "steroid_treatment")
 output_dir <- if (length(args) >= 4L && nzchar(args[4L])) args[4L] else
-  file.path(script_dir, "summary_eda")
+  file.path(script_dir, "pipeline_output", "shareable", "cohort_summary_eda")
 min_cell_n <- if (length(args) >= 5L && nzchar(args[5L])) {
   suppressWarnings(as.integer(args[5L]))
 } else suppressWarnings(as.integer(
@@ -46,7 +46,7 @@ if (!is.finite(min_cell_n) || min_cell_n < 1L) {
   stop("MIN_CELL_N must be a positive integer.", call. = FALSE)
 }
 cutoff_text <- if (length(args) >= 6L && nzchar(args[6L])) args[6L] else
-  Sys.getenv("CLIF_DATA_CUTOFF_DATE", unset = "")
+  Sys.getenv("CLIF_DATA_CUTOFF_DATE", unset = "2026-10-31")
 specified_cutoff_dttm <- if (nzchar(cutoff_text)) {
   as.POSIXct(paste0(as.Date(cutoff_text), " 23:59:59"), tz = "UTC")
 } else as.POSIXct(NA, tz = "UTC")
@@ -58,6 +58,8 @@ dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 cohort_path <- file.path(cohort_dir, "adult_pneumonia_cohort.parquet")
 treatment_path <- file.path(treatment_dir, "steroid_treatment_assignment.parquet")
 attrition_path <- file.path(cohort_dir, "adult_pneumonia_attrition.csv")
+design_path <- file.path(cohort_dir, "adult_pneumonia_cohort_design.csv")
+icd_definition_path <- file.path(cohort_dir, "pneumonia_icd_definition.csv")
 if (!file.exists(cohort_path)) stop("Missing: ", cohort_path, call. = FALSE)
 if (!file.exists(treatment_path)) stop("Missing: ", treatment_path, call. = FALSE)
 
@@ -306,6 +308,21 @@ overall_summary <- data.table(
 )
 write_summary(overall_summary, "cohort_overall_summary.csv")
 
+# Copy non-identifying cohort-construction metadata into the explicitly
+# shareable results branch. Patient-level source files remain in sensitive/.
+if (file.exists(attrition_path)) {
+  attrition_shareable <- fread(attrition_path)[
+    !grepl("death before time zero", step, ignore.case = TRUE)
+  ]
+  write_summary(attrition_shareable, "cohort_attrition.csv")
+}
+if (file.exists(design_path)) {
+  write_summary(fread(design_path), "cohort_design.csv")
+}
+if (file.exists(icd_definition_path)) {
+  write_summary(fread(icd_definition_path), "pneumonia_icd_definition.csv")
+}
+
 site_summary <- cohort[, .(
   n = .N,
   n_grace_complete = sum(complete_grace_followup, na.rm = TRUE),
@@ -541,7 +558,13 @@ write_summary(quality_flags, "data_quality_checks.csv")
 theme_set(theme_minimal(base_size = 13))
 if (file.exists(attrition_path)) {
   attrition <- fread(attrition_path)
-  attrition_plot <- attrition[!is.na(n_hospital_blocks)]
+  # Combine the pre-time-zero death check with the following code-status step
+  # in portable outputs so a small excluded cell cannot be reconstructed by
+  # subtracting adjacent attrition counts. The exact row remains sensitive.
+  attrition_plot <- attrition[
+    !is.na(n_hospital_blocks) &
+      !grepl("death before time zero", step, ignore.case = TRUE)
+  ]
   attrition_plot[, step := factor(step, levels = rev(step))]
   p <- ggplot(attrition_plot, aes(n_hospital_blocks, step)) +
     geom_col(fill = "#2C7FB8") +

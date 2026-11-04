@@ -31,7 +31,8 @@ script_dir <- if (length(script_file)) {
   dirname(normalizePath(sub("^--file=", "", script_file[1L])))
 } else normalizePath(getwd())
 output_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
-  file.path(script_dir, "glucocorticoid_source_check")
+  file.path(script_dir, "pipeline_output", "sensitive",
+            "glucocorticoid_source_profile")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 medication_files <- list.files(

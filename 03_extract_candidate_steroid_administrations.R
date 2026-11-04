@@ -35,9 +35,9 @@ script_dir <- if (length(script_file)) {
   dirname(normalizePath(sub("^--file=", "", script_file[1L])))
 } else normalizePath(getwd())
 cohort_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
-  file.path(script_dir, "output")
+  file.path(script_dir, "pipeline_output", "sensitive", "cohort")
 output_dir <- if (length(args) >= 3L && nzchar(args[3L])) args[3L] else
-  file.path(script_dir, "steroid_candidates")
+  file.path(script_dir, "pipeline_output", "sensitive", "steroid_candidates")
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 medication_path <- file.path(

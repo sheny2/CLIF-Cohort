@@ -29,12 +29,14 @@ per patient using the CAPE COD-aligned rules confirmed for this emulation:
 5. Define time zero as the first eligible initiation of IMV or NIPPV, or HFNO initiation with a contemporaneous S/F ratio below 315 while FiO2 is greater than 0.50. SpO2 and HFNO FiO2 records are paired within four hours. No future respiratory-support duration is required.
 6. Exclude DNR/DNI-equivalent code status (`and`, `dnr`, `dni`, `dnar`, `dnr/dni`, or `dnar/dni` after normalization) documented during the seven days before and through time zero.
 7. Exclude the concurrent-shock proxy at time zero: any active norepinephrine/epinephrine on NIPPV or HFNO; norepinephrine/epinephrine at least 0.25 mcg/kg/min on IMV; any active vasopressin; or lactate at least 4 mmol/L. The most recent medication and lactate records in the preceding six hours are used. Missing or nonconvertible shock data are retained and flagged rather than treated as evidence of shock.
-8. Randomly select one eligible block per patient.
+8. Exclude any patient whose recorded `death_dttm` occurs before time zero.
+9. Randomly select one eligible block per patient.
 
 
 
 ## Required CLIF files
 
+- `clif_patient.parquet`
 - `clif_hospitalization.parquet`
 - `clif_hospital_diagnosis.parquet`
 - `clif_respiratory_support.parquet`
@@ -78,16 +80,16 @@ separate target-trial parameter.
 ```bash
 Rscript 00_check_clif_cohort_inputs.R \
   /path/to/hopkins/clif \
-  ./input_check
+  ./pipeline_output/sensitive/input_checks
 ```
 
 Review:
 
-- `input_check/required_schema_check.csv`
-- `input_check/sampled_category_values.csv`
-- `input_check/category_compatibility_check.csv`
-- `input_check/site_provenance_check.csv`
-- `input_check/optional_medication_table_check.csv`
+- `pipeline_output/sensitive/input_checks/required_schema_check.csv`
+- `pipeline_output/sensitive/input_checks/sampled_category_values.csv`
+- `pipeline_output/sensitive/input_checks/category_compatibility_check.csv`
+- `pipeline_output/sensitive/input_checks/site_provenance_check.csv`
+- `pipeline_output/sensitive/input_checks/optional_medication_table_check.csv`
 
 The category report is important because CLIF column names can conform while
 site-specific category values still differ.
@@ -97,7 +99,7 @@ site-specific category values still differ.
 ```bash
 Rscript 01_build_adult_pneumonia_cohort.R \
   /path/to/hopkins/clif \
-  ./output \
+  ./pipeline_output/sensitive/cohort \
   poa_any \
   6 \
   32284 \
@@ -138,7 +140,9 @@ If the data is already split into separate directories, run the script once per 
 
 ```bash
 export CLIF_SITE_COLUMN=admission_hospital_id
-Rscript 01_build_adult_pneumonia_cohort.R /path/to/hopkins/clif ./output
+Rscript 01_build_adult_pneumonia_cohort.R \
+  /path/to/hopkins/clif \
+  ./pipeline_output/sensitive/cohort
 ```
 
 ## 3. Locate glucocorticoid information
@@ -148,15 +152,15 @@ Run the discovery script before defining treatment:
 ```bash
 Rscript 02_profile_glucocorticoid_sources.R \
   /path/to/hopkins/clif \
-  ./glucocorticoid_source_check
+  ./pipeline_output/sensitive/glucocorticoid_source_profile
 ```
 
 Review:
 
-- `glucocorticoid_source_check/medication_table_inventory.csv`
-- `glucocorticoid_source_check/glucocorticoid_candidate_values.csv`
-- `glucocorticoid_source_check/glucocorticoid_candidate_routes.csv`
-- `glucocorticoid_source_check/glucocorticoid_search_dictionary.csv`
+- `pipeline_output/sensitive/glucocorticoid_source_profile/medication_table_inventory.csv`
+- `pipeline_output/sensitive/glucocorticoid_source_profile/glucocorticoid_candidate_values.csv`
+- `pipeline_output/sensitive/glucocorticoid_source_profile/glucocorticoid_candidate_routes.csv`
+- `pipeline_output/sensitive/glucocorticoid_source_profile/glucocorticoid_search_dictionary.csv`
 
 This step verifies the confirmed `med_group`, administration-time, dose, and
 route fields while also profiling medication names and categories.
@@ -168,8 +172,8 @@ After building the cohort, extract route-eligible steroid administrations:
 ```bash
 Rscript 03_extract_candidate_steroid_administrations.R \
   /path/to/hopkins/clif \
-  ./output \
-  ./steroid_candidates
+  ./pipeline_output/sensitive/cohort \
+  ./pipeline_output/sensitive/steroid_candidates
 ```
 
 This links medication administrations to the selected cohort through component
@@ -189,9 +193,9 @@ Run without a grace period to audit qualifying administrations:
 
 ```bash
 Rscript 04_define_steroid_treatment.R \
-  ./steroid_candidates \
-  ./output \
-  ./steroid_treatment
+  ./pipeline_output/sensitive/steroid_candidates \
+  ./pipeline_output/sensitive/cohort \
+  ./pipeline_output/sensitive/steroid_treatment
 ```
 
 Once the target-trial grace period is finalized, provide it in hours as the
@@ -199,9 +203,9 @@ fourth argument. For example, if the finalized protocol specifies 24 hours:
 
 ```bash
 Rscript 04_define_steroid_treatment.R \
-  ./steroid_candidates \
-  ./output \
-  ./steroid_treatment \
+  ./pipeline_output/sensitive/steroid_candidates \
+  ./pipeline_output/sensitive/cohort \
+  ./pipeline_output/sensitive/steroid_treatment \
   24
 ```
 
@@ -227,32 +231,42 @@ files in place but writes only suppressed aggregate CSVs and PNG figures:
 ```bash
 Rscript 05_cohort_summary_eda.R \
   /projects/emulate_icu/rclif_2_1 \
-  ./output \
-  ./steroid_treatment \
-  ./summary_eda \
-  10
-```
-
-The fifth argument is the minimum reportable cell size. An exact extraction
-cutoff date is strongly preferred for 28-day follow-up. Once confirmed, supply
-it as the sixth argument:
-
-```bash
-Rscript 05_cohort_summary_eda.R \
-  /projects/emulate_icu/rclif_2_1 \
-  ./output \
-  ./steroid_treatment \
-  ./summary_eda \
+  ./pipeline_output/sensitive/cohort \
+  ./pipeline_output/sensitive/steroid_treatment \
+  ./pipeline_output/shareable/cohort_summary_eda \
   10 \
-  2026-09-DD
+  2026-10-31
 ```
 
-Replace `2026-09-DD` with the actual final observation date. If omitted, the
-script transparently uses the latest observed timestamp as a provisional data
-cutoff and flags that inference. Outputs cover attrition, hospital/site counts,
+The fifth argument is the minimum reportable cell size. The current study
+cutoff is October 31, 2026. It is also the script default and can be overridden
+by the sixth argument or `CLIF_DATA_CUTOFF_DATE`. Outputs cover attrition,
+hospital/site counts,
 treatment uptake and timing, baseline characteristics, missingness, discharge
 outcomes, mortality, and follow-up completeness. Identifier columns are blocked
 from all CSV exports.
+
+## Output organization
+
+All generated files now live under one root:
+
+```text
+pipeline_output/
+├── sensitive/
+│   ├── input_checks/
+│   ├── glucocorticoid_source_profile/
+│   ├── cohort/
+│   ├── steroid_candidates/
+│   └── steroid_treatment/
+└── shareable/
+    └── cohort_summary_eda/
+```
+
+Everything under `sensitive/` must remain on Discovery. The `shareable/`
+branch contains only identifier-free, small-cell-suppressed summaries and
+figures, including copies of cohort attrition, design, and ICD-definition
+metadata. These outputs still require the usual disclosure review before
+being moved from the HPC.
 
 ## Principal outputs
 
