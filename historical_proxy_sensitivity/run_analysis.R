@@ -9,13 +9,16 @@ self <- normalizePath(sub("^--file=", "", grep("^--file=", commandArgs(), value 
 folder <- dirname(self)
 parent_dir <- dirname(folder)
 source(file.path(folder, "history_helpers.R"))
-coverage_text <- Sys.getenv("HISTORY_COVERAGE_START", "")
+history_mode <- Sys.getenv("HISTORY_MODE", "observed_extract")
+if (!history_mode %in% c("observed_extract", "complete_history")) stop("HISTORY_MODE must be observed_extract or complete_history.")
+# The project documents a January 2021 extraction start. Override if different.
+coverage_text <- Sys.getenv("HISTORY_COVERAGE_START", if (history_mode == "observed_extract") "2021-01-01" else "")
 coverage_start <- as.POSIXct(paste(coverage_text, "00:00:00"), tz = "UTC")
-if (!nzchar(coverage_text) || is.na(coverage_start)) stop("Set HISTORY_COVERAGE_START=YYYY-MM-DD to the known historical extract start.")
-if (Sys.getenv("HISTORY_SOURCE_COMPLETE", "") != "yes") stop(paste(
-  "Set HISTORY_SOURCE_COMPLETE=yes only for historical tables containing ALL",
-  "hospitalizations and linked ICU, support and diagnosis records, not just the",
-  "ED/respiratory-support-filtered analytic extract. Otherwise history zeros are unknown."))
+if (!nzchar(coverage_text) || is.na(coverage_start)) stop("Set HISTORY_COVERAGE_START=YYYY-MM-DD to the extract start.")
+if (history_mode == "complete_history" && Sys.getenv("HISTORY_SOURCE_COMPLETE", "") != "yes") stop(
+  "Complete-history mode requires HISTORY_SOURCE_COMPLETE=yes and unfiltered historical tables.")
+if (history_mode == "observed_extract") message(
+  "Using observed history in the supplied extract. Zero means no recorded qualifying prior event; it does not establish absence of prior hospitalization.")
 grace <- suppressWarnings(as.numeric(Sys.getenv("TREATMENT_GRACE_HOURS", "96")))
 if (length(grace) != 1L || !is.finite(grace) || grace < 6 || grace >= 672 || grace %% 6 != 0) stop("Grace must be a multiple of six hours in [6, 672).")
 # A new root prevents accidental overwrite of the original analysis or a prior run.
@@ -23,12 +26,13 @@ output <- argv[5]
 if (dir.exists(output) || file.exists(output)) stop("NEW_OUTPUT_ROOT already exists; choose a fresh directory.")
 cohort <- as.data.table(read_parquet(file.path(argv[2], "adult_pneumonia_cohort.parquet")))
 history_dir <- argv[4]
+patient_ids <- as.character(cohort$patient_id)
 read_history <- function(file, columns, ids = NULL) {
   ds <- open_dataset(file.path(history_dir, file))
   if (!all(columns %in% ds$schema$names)) stop("Missing history columns in ", file)
   q <- ds |> select(all_of(columns))
   if (!is.null(ids)) q <- q |> filter(.data$hospitalization_id %in% ids)
-  else q <- q |> filter(.data$patient_id %in% as.character(cohort$patient_id))
+  else q <- q |> filter(.data$patient_id %in% patient_ids)
   as.data.table(collect(q))
 }
 h <- read_history("clif_hospitalization.parquet", c("hospitalization_id", "patient_id", "admission_dttm", "discharge_dttm", "admission_type_category"))
@@ -36,8 +40,8 @@ ids <- as.character(h$hospitalization_id)
 a <- read_history("clif_adt.parquet", c("hospitalization_id", "in_dttm", "location_category"), ids)
 r <- read_history("clif_respiratory_support.parquet", c("hospitalization_id", "recorded_dttm", "device_category"), ids)
 d <- read_history("clif_hospital_diagnosis.parquet", c("hospitalization_id", "diagnosis_code", "diagnosis_code_format"), ids)
-proxies <- build_history_proxies(cohort, h, a, r, d, coverage_start)
-if (!any(proxies$history_available == 1L)) stop("No patients have a full 365-day historical coverage window.")
+proxies <- build_history_proxies(cohort, h, a, r, d, coverage_start, history_mode = history_mode)
+if (history_mode == "complete_history" && !any(proxies$full_calendar_lookback == 1L)) stop("No patients have a full 365-day historical coverage window.")
 dir.create(file.path(output, "sensitive"), recursive = TRUE)
 write_parquet(proxies, file.path(output, "sensitive", "historical_proxies.parquet"))
 fwrite(data.table(file = c("07_prepare_and_run_five_methods.R", "06_generalized_five_methods.R"),
@@ -64,7 +68,7 @@ for (mode in c("reference", "augmented")) {
     if (is_assignment(expr, "grace_hours")) { e$grace_hours <- as.integer(grace); next }
     if (j == base_index && mode == "augmented") {
       e$long <- merge(e$long, proxies[, c("hospital_block_id", historical_proxy_names,
-                                          "prior_history_unavailable"), with = FALSE],
+                                          "prior_history_short_lookback", "history_lookback_days"), with = FALSE],
                       by = "hospital_block_id", all.x = TRUE, sort = FALSE)
       setorder(e$long, site, hospital_block_id, m)
       for (nm in historical_proxy_names) setnafill(e$long, "const", 0, cols = nm)
@@ -72,13 +76,15 @@ for (mode in c("reference", "augmented")) {
     eval(expr, envir = e)
     if (j == base_index && mode == "augmented") {
       e$baseline_covariates <- c(e$baseline_covariates, historical_proxy_names,
-                                 "prior_history_unavailable")
+                                 "prior_history_short_lookback", "history_lookback_days")
     }
   }
   writeLines(c(paste("mode:", mode), paste("grace_hours:", grace),
-               paste("history_coverage_start:", coverage_text),
+               paste("history_coverage_start:", coverage_text), paste("history_mode:", history_mode),
                paste("history_source:", normalizePath(history_dir)),
-               "Unknown history: zero-filled proxies plus prior_history_unavailable indicator.",
+               "Proxies describe events observed in the supplied source, not complete lifetime or outside-system history.",
+               "Short windows: observed mode retains observed positives; complete mode zero-fills unknowns with a short-lookback indicator.",
+               "Models also adjust for available lookback days; extract filters may make proxies redundant.",
                "Historical proxies augment baseline models; this is not NN/MNN effect calibration."),
              file.path(output, "sensitive", mode, "historical_proxy_design.txt"))
 }
@@ -86,9 +92,9 @@ for (mode in c("reference", "augmented")) {
 threshold <- as.integer(Sys.getenv("SUMMARY_SMALL_CELL_THRESHOLD", "10"))
 if (!is.finite(threshold) || threshold < 1) stop("Invalid suppression threshold.")
 summary <- rbindlist(lapply(historical_proxy_names, function(nm) {
-  x <- proxies[history_available == 1L, get(nm)]
+  x <- proxies[!is.na(get(nm)), get(nm)]
   report <- sum(x) >= threshold && sum(1L - x) >= threshold
-  data.table(variable = nm, n_history_available = if (length(x) >= threshold) length(x) else NA_integer_,
+  data.table(variable = nm, history_mode = history_mode, extract_calendar_start = coverage_text, zero_interpretation = "no qualifying event observed in the supplied extract/window", n_evaluable = if (length(x) >= threshold) length(x) else NA_integer_,
              n_positive = if (report) sum(x) else NA_integer_,
              percent_positive = if (report) 100 * mean(x) else NA_real_)
 }))

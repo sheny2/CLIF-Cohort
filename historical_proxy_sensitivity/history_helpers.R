@@ -1,10 +1,12 @@
 # Pure historical-feature construction, independently testable without Arrow.
-historical_proxy_names <- c("prior_icu", "prior_respiratory_hospitalization",
-                            "prior_emergency_hospitalization", "prior_imv")
+historical_proxy_names <- c("observed_prior_icu", "observed_prior_respiratory_hospitalization",
+                            "observed_prior_emergency_hospitalization", "observed_prior_imv")
 
 build_history_proxies <- function(cohort, hospitalization, adt, respiratory,
-                                  diagnosis, coverage_start, gap_hours = 6) {
+                                  diagnosis, coverage_start, gap_hours = 6,
+                                  history_mode = "observed_extract") {
   library(data.table)
+  stopifnot(history_mode %in% c("observed_extract", "complete_history"))
   c <- copy(as.data.table(cohort))
   h <- copy(as.data.table(hospitalization))
   required <- c("hospitalization_id", "patient_id", "admission_dttm",
@@ -54,11 +56,13 @@ build_history_proxies <- function(cohort, hospitalization, adt, respiratory,
     by = patient_id]
   episodes <- h[, .(history_start = min(admission_dttm),
                      history_end = max(discharge_dttm),
-                     prior_icu = max(icu), prior_respiratory_hospitalization = max(resp),
-                     prior_emergency_hospitalization = max(emergency), prior_imv = max(imv)),
+                     observed_prior_icu = max(icu), observed_prior_respiratory_hospitalization = max(resp),
+                     observed_prior_emergency_hospitalization = max(emergency), observed_prior_imv = max(imv)),
                  by = .(patient_id, episode)]
   out <- c[, .(hospital_block_id, patient_id, index_admission = admission_dttm)]
-  out[, history_available := as.integer(index_admission - 365 * 86400 >= coverage_start)]
+  out[, history_lookback_days := pmax(0, pmin(365,
+    as.numeric(difftime(index_admission, coverage_start, units = "days"))))]
+  out[, full_calendar_lookback := as.integer(index_admission - 365 * 86400 >= coverage_start)]
   joined <- merge(out, episodes, by = "patient_id", allow.cartesian = TRUE)
   prior <- joined[history_start >= index_admission - 365 * 86400 &
                     history_end < index_admission - gap_hours * 3600]
@@ -66,9 +70,14 @@ build_history_proxies <- function(cohort, hospitalization, adt, respiratory,
                  .SDcols = historical_proxy_names]
   out <- merge(out, flags, by = "hospital_block_id", all.x = TRUE, sort = FALSE)
   for (nm in historical_proxy_names) {
-    out[history_available == 1L & is.na(get(nm)), (nm) := 0L]
-    out[history_available == 0L, (nm) := NA_integer_]
+    # Observed mode: 0 means no event found in the available filtered window.
+    # Positive evidence is preserved even when less than a year is available.
+    out[is.na(get(nm)), (nm) := 0L]
+    if (history_mode == "complete_history") {
+      out[full_calendar_lookback == 0L, (nm) := NA_integer_]
+    }
   }
-  out[, prior_history_unavailable := 1L - history_available]
+  out[, history_mode := history_mode]
+  out[, prior_history_short_lookback := 1L - full_calendar_lookback]
   out
 }
