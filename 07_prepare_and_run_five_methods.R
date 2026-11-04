@@ -1200,6 +1200,371 @@ write_shareable_csv(
   weight_diagnostics, "federated_ccw_weight_diagnostics.csv"
 )
 
+# ---- Covariate-balance diagnostics -----------------------------------------
+#
+# Weight ranges and effective sample sizes do not establish exchangeability.
+# The diagnostics below calculate interval-specific standardized mean
+# differences (SMDs) using the exact risk sets and weights used by each
+# estimator.  The plotted value is the largest absolute SMD during the four
+# treatment-decision intervals in the 24-hour grace period.  The complete
+# interval-specific results are also saved so balance later in follow-up can be
+# inspected without exposing patient-level data.
+#
+# Federated and pooled site-stratified CCW use the same local nuisance models,
+# weights, and weighted risk sets by design, so a single CCW Love plot applies
+# to both estimators.  Per-protocol is unweighted; its before/after points are
+# intentionally identical.
+
+balance_variables <- unique(c(
+  analysis$config$baseline,
+  analysis$config$tv,
+  analysis$config$lag_names
+))
+
+weighted_mean_safe <- function(x, w) {
+  keep <- is.finite(x) & is.finite(w) & w >= 0
+  if (!any(keep) || sum(w[keep]) <= 0) return(NA_real_)
+  sum(x[keep] * w[keep]) / sum(w[keep])
+}
+
+unweighted_variance_safe <- function(x) {
+  x <- x[is.finite(x)]
+  if (length(x) < 2L) return(NA_real_)
+  stats::var(x)
+}
+
+balance_one_variable <- function(x1, x0, w1, w0) {
+  keep1 <- is.finite(x1) & is.finite(w1) & w1 >= 0
+  keep0 <- is.finite(x0) & is.finite(w0) & w0 >= 0
+  x1 <- x1[keep1]
+  x0 <- x0[keep0]
+  w1 <- w1[keep1]
+  w0 <- w0[keep0]
+  if (length(x1) < 2L || length(x0) < 2L ||
+      sum(w1) <= 0 || sum(w0) <= 0) {
+    return(c(
+      smd_before = NA_real_, smd_after = NA_real_,
+      n1 = length(x1), n0 = length(x0),
+      ess1 = NA_real_, ess0 = NA_real_
+    ))
+  }
+
+  # Use the same unweighted pooled standardization factor before and after
+  # weighting.  This ensures changes in the SMD reflect changes in means from
+  # weighting rather than changes in the denominator.
+  standardizer <- sqrt(
+    (unweighted_variance_safe(x1) + unweighted_variance_safe(x0)) / 2
+  )
+  if (!is.finite(standardizer) || standardizer <= 0) {
+    return(c(
+      smd_before = NA_real_, smd_after = NA_real_,
+      n1 = length(x1), n0 = length(x0),
+      ess1 = sum(w1)^2 / sum(w1^2),
+      ess0 = sum(w0)^2 / sum(w0^2)
+    ))
+  }
+
+  c(
+    smd_before = (mean(x1) - mean(x0)) / standardizer,
+    smd_after = (
+      weighted_mean_safe(x1, w1) - weighted_mean_safe(x0, w0)
+    ) / standardizer,
+    n1 = length(x1),
+    n0 = length(x0),
+    ess1 = sum(w1)^2 / sum(w1^2),
+    ess0 = sum(w0)^2 / sum(w0^2)
+  )
+}
+
+component_arm_data <- function(site_name, interval, method_key, arm) {
+  component <- analysis$site_components[[site_name]]
+  site_interval <- analysis$data[
+    analysis$data$.site == site_name & analysis$data$.time == interval,
+    ,
+    drop = FALSE
+  ]
+  row_index <- match(component$uid, as.character(site_interval$.uid))
+  observed <- !is.na(row_index)
+  early_treatment <- component$S <= analysis$config$tau
+
+  if (method_key == "ccw") {
+    eligible <- if (arm == 1L) {
+      component$R1[, interval]
+    } else component$R0[, interval]
+    weights <- if (arm == 1L) {
+      component$W1[, interval]
+    } else component$W0[, interval]
+  } else if (method_key == "ipcw_no_clone") {
+    eligible <- observed & if (arm == 1L) early_treatment else !early_treatment
+    weights <- if (arm == 1L) {
+      component$W1[, interval]
+    } else component$W0[, interval]
+  } else if (method_key == "perprotocol_naive") {
+    eligible <- observed & if (arm == 1L) early_treatment else !early_treatment
+    weights <- rep(1, component$n)
+  } else {
+    stop("Unknown component-based balance method: ", method_key)
+  }
+
+  keep <- which(eligible & observed & is.finite(weights))
+  if (!length(keep)) return(NULL)
+  answer <- as.data.table(
+    as.data.frame(site_interval)[
+      row_index[keep], balance_variables, drop = FALSE
+    ]
+  )
+  answer[, `.balance_weight` := weights[keep]]
+  answer
+}
+
+component_method_balance <- function(method_key, intervals = seq_len(M)) {
+  rbindlist(lapply(intervals, function(interval) {
+    arm1 <- rbindlist(lapply(
+      names(analysis$site_components),
+      component_arm_data,
+      interval = interval,
+      method_key = method_key,
+      arm = 1L
+    ), fill = TRUE)
+    arm0 <- rbindlist(lapply(
+      names(analysis$site_components),
+      component_arm_data,
+      interval = interval,
+      method_key = method_key,
+      arm = 0L
+    ), fill = TRUE)
+    if (!nrow(arm1) || !nrow(arm0)) return(NULL)
+
+    rbindlist(lapply(balance_variables, function(variable) {
+      values <- balance_one_variable(
+        arm1[[variable]], arm0[[variable]],
+        arm1$.balance_weight, arm0$.balance_weight
+      )
+      data.table(
+        method_key = method_key,
+        interval = interval,
+        hours_from_time_zero = interval * step_hours,
+        variable = variable,
+        smd_before = unname(values[["smd_before"]]),
+        smd_after = unname(values[["smd_after"]]),
+        n_treatment = as.integer(values[["n1"]]),
+        n_no_treatment = as.integer(values[["n0"]]),
+        effective_n_treatment = unname(values[["ess1"]]),
+        effective_n_no_treatment = unname(values[["ess0"]])
+      )
+    }))
+  }), fill = TRUE)
+}
+
+landmark_balance <- function() {
+  d <- analysis$data
+  tau_balance <- analysis$config$tau
+  landmark_by_site <- lapply(split(d, d$.site), function(site_data) {
+    site_data[
+      site_data$.time == tau_balance &
+        site_data$.event == 0L & site_data$.censor == 0L,
+      ,
+      drop = FALSE
+    ]
+  })
+  treated_total <- sum(vapply(
+    landmark_by_site,
+    function(x) sum(x$.S <= tau_balance),
+    numeric(1)
+  ))
+  eligible_total <- sum(vapply(landmark_by_site, nrow, integer(1)))
+  p_num <- g6_clamp_prob(treated_total / eligible_total)
+  propensity_terms <- setdiff(
+    analysis$config$terms$initiation_denominator,
+    c(".time", ".time_f", ".trt", ".trt_lag")
+  )
+
+  landmark <- rbindlist(Map(function(site_data, site_name) {
+    if (!nrow(site_data)) return(NULL)
+    site_data$.A <- as.integer(site_data$.S <= tau_balance)
+    if (length(unique(site_data$.A)) < 2L) {
+      p_den <- rep(g6_clamp_prob(mean(site_data$.A)), nrow(site_data))
+    } else {
+      fit <- g6_fit_binary(
+        site_data,
+        ".A",
+        propensity_terms,
+        analysis$config$learners$initiation
+      )
+      p_den <- g6_predict_binary(fit, site_data)
+    }
+    weights <- ifelse(
+      site_data$.A == 1L,
+      p_num / p_den,
+      (1 - p_num) / (1 - p_den)
+    )
+    limits <- quantile(
+      weights[is.finite(weights)],
+      probs = analysis$config$trunc,
+      names = FALSE,
+      na.rm = TRUE
+    )
+    site_data$.balance_weight <- pmin(pmax(weights, limits[1L]), limits[2L])
+    site_data$.balance_site <- site_name
+    as.data.table(site_data)
+  }, landmark_by_site, names(landmark_by_site)), fill = TRUE)
+
+  arm1 <- landmark[.A == 1L]
+  arm0 <- landmark[.A == 0L]
+  rbindlist(lapply(balance_variables, function(variable) {
+    values <- balance_one_variable(
+      arm1[[variable]], arm0[[variable]],
+      arm1$.balance_weight, arm0$.balance_weight
+    )
+    data.table(
+      method_key = "landmark_ipw",
+      interval = tau_balance,
+      hours_from_time_zero = tau_balance * step_hours,
+      variable = variable,
+      smd_before = unname(values[["smd_before"]]),
+      smd_after = unname(values[["smd_after"]]),
+      n_treatment = as.integer(values[["n1"]]),
+      n_no_treatment = as.integer(values[["n0"]]),
+      effective_n_treatment = unname(values[["ess1"]]),
+      effective_n_no_treatment = unname(values[["ess0"]])
+    )
+  }))
+}
+
+message("Calculating covariate-balance diagnostics...")
+balance_by_interval <- rbindlist(list(
+  component_method_balance("ccw"),
+  landmark_balance(),
+  component_method_balance("ipcw_no_clone"),
+  component_method_balance("perprotocol_naive")
+), fill = TRUE)
+
+balance_method_labels <- c(
+  ccw = "CCW (federated and pooled site-stratified)",
+  landmark_ipw = "Landmark IPW",
+  ipcw_no_clone = "IPCW without cloning",
+  perprotocol_naive = "Per-protocol, unweighted"
+)
+balance_by_interval[, method := unname(balance_method_labels[method_key])]
+balance_by_interval[, within_grace_period := interval <= tau]
+write_shareable_csv(
+  balance_by_interval,
+  "covariate_balance_by_method_and_interval.csv"
+)
+
+# The Love plots use the worst absolute imbalance observed in the grace period.
+# This avoids concealing a poorly balanced treatment-decision interval by
+# averaging SMDs over time.  Landmark has one assessment at hour 24.
+balance_love_data <- balance_by_interval[
+  within_grace_period == TRUE &
+    is.finite(smd_before) & is.finite(smd_after),
+  .(
+    abs_smd_before = max(abs(smd_before), na.rm = TRUE),
+    abs_smd_after = max(abs(smd_after), na.rm = TRUE),
+    interval_of_worst_before = interval[which.max(abs(smd_before))],
+    interval_of_worst_after = interval[which.max(abs(smd_after))]
+  ),
+  by = .(method_key, method, variable)
+]
+write_shareable_csv(balance_love_data, "covariate_balance_love_plot_data.csv")
+
+balance_summary <- balance_love_data[, .(
+  variables_assessed = .N,
+  median_abs_smd_before = median(abs_smd_before),
+  median_abs_smd_after = median(abs_smd_after),
+  maximum_abs_smd_before = max(abs_smd_before),
+  maximum_abs_smd_after = max(abs_smd_after),
+  variables_over_0_10_before = sum(abs_smd_before > 0.10),
+  variables_over_0_10_after = sum(abs_smd_after > 0.10),
+  variables_over_0_05_before = sum(abs_smd_before > 0.05),
+  variables_over_0_05_after = sum(abs_smd_after > 0.05)
+), by = .(method_key, method)]
+write_shareable_csv(balance_summary, "covariate_balance_summary.csv")
+
+pretty_balance_name <- function(x) {
+  x <- sub("^lag_", "Prior interval: ", x)
+  x <- gsub("_model$", "", x)
+  x <- gsub("_", " ", x)
+  tools::toTitleCase(x)
+}
+
+for (method_key_value in names(balance_method_labels)) {
+  plot_data <- copy(balance_love_data[method_key == method_key_value])
+  if (!nrow(plot_data)) next
+  plot_data[, variable_label := pretty_balance_name(variable)]
+  plot_data[, variable_label := factor(
+    variable_label,
+    levels = variable_label[order(pmax(abs_smd_before, abs_smd_after))]
+  )]
+  long_plot <- melt(
+    plot_data,
+    id.vars = c("variable", "variable_label"),
+    measure.vars = c("abs_smd_before", "abs_smd_after"),
+    variable.name = "weighting",
+    value.name = "absolute_smd"
+  )
+  long_plot[, weighting := factor(
+    weighting,
+    levels = c("abs_smd_before", "abs_smd_after"),
+    labels = c("Before weighting", "After weighting")
+  )]
+
+  love_plot <- ggplot(
+    long_plot,
+    aes(x = absolute_smd, y = variable_label, color = weighting)
+  ) +
+    geom_vline(xintercept = 0.10, linetype = "dashed", color = "#B22222") +
+    geom_vline(xintercept = 0.05, linetype = "dotted", color = "grey50") +
+    geom_line(
+      aes(group = variable_label),
+      color = "grey75",
+      linewidth = 0.45
+    ) +
+    geom_point(size = 2.4) +
+    scale_color_manual(values = c(
+      "Before weighting" = "#D55E00",
+      "After weighting" = "#0072B2"
+    )) +
+    labs(
+      title = paste0(balance_method_labels[[method_key_value]],
+                     ": covariate balance"),
+      subtitle = if (method_key_value == "landmark_ipw") {
+        "Absolute SMD at the 24-hour landmark"
+      } else if (method_key_value == "perprotocol_naive") {
+        paste(
+          "Worst absolute SMD across the four treatment-decision intervals;",
+          "before and after are identical because this method is unweighted"
+        )
+      } else {
+        paste(
+          "Worst absolute SMD across the four treatment-decision intervals;",
+          "dashed line = 0.10"
+        )
+      },
+      x = "Absolute standardized mean difference",
+      y = NULL,
+      color = NULL
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank()
+    )
+
+  ggsave(
+    file.path(
+      shareable_dir,
+      paste0("love_plot_", method_key_value, ".png")
+    ),
+    love_plot,
+    width = 9,
+    height = max(7, 0.27 * nrow(plot_data) + 2.5),
+    dpi = 300,
+    limitsize = FALSE
+  )
+}
+
 local_stats <- lapply(analysis$site_components, g6_local_stats)
 sum_stat <- function(name) Reduce(`+`, lapply(local_stats, `[[`, name))
 risk_event_counts <- data.table(

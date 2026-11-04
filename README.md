@@ -303,10 +303,21 @@ The sixth argument is the maximum patient count; `0` uses the full cohort.
 Patient/block-level person-period data, crosswalks, fitted components, and RDS
 objects remain under `sensitive/ccw_analysis`; the interval-specific weighted
 risk/event counts transmitted by hospitals also remain there because small
-event cells can occur. Identifier-free method estimates,
-survival curves, effect plots, model specifications, covariate-processing
-summaries, hospital summaries, warnings, and the federated-versus-pooled
-identity check are written to `shareable/ccw_results`.
+event cells can occur. Identifier-free method estimates, survival curves,
+effect plots, model specifications, covariate-processing summaries, hospital
+summaries, warnings, covariate-balance diagnostics, and the
+federated-versus-pooled identity check are written to
+`shareable/ccw_results`.
+
+The balance diagnostics use the exact estimator-specific risk sets and
+weights. They include interval-level SMDs, a compact balance summary, and
+separate Love plots for CCW, landmark IPW, IPCW without cloning, and the
+unweighted per-protocol analysis. Federated and pooled site-stratified CCW
+share one CCW plot because their local nuisance models, weights, and risk sets
+are identical by design. The Love plots show the worst absolute SMD across the
+four six-hour treatment-decision intervals; the landmark plot is evaluated at
+24 hours. For the unweighted per-protocol method, the before/after points are
+intentionally identical.
 
 Baseline adjustment includes age, sex and a missing-sex indicator, baseline
 respiratory support, initial ICU/ED location, admission year and season, and
