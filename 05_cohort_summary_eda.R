@@ -607,25 +607,59 @@ if ("length_of_stay_days" %in% names(cohort)) {
   }
 }
 
-if ("treatment_hours_from_time_zero" %in% names(cohort) &&
-    is.finite(grace_hours)) {
-  timing <- cohort[
-    treated_within_grace == 1L & is.finite(treatment_hours_from_time_zero),
-    .(bin_start = floor(treatment_hours_from_time_zero / 4) * 4)
-  ][, .N, by = bin_start]
-  timing[, n_reportable := report_count(N)]
-  timing <- timing[!is.na(n_reportable)]
-  if (nrow(timing)) {
-    p <- ggplot(timing, aes(bin_start, n_reportable)) +
-      geom_col(width = 3.7, fill = "#E6550D") +
-      labs(title = "Time to qualifying steroid treatment",
-           subtitle = paste0("Four-hour bins within the ", grace_hours,
-                             "-hour grace period"),
-           x = "Hours from respiratory-failure time zero", y = "Patients")
-    ggsave(file.path(output_dir, "plot_treatment_timing.png"), p,
-           width = 8.5, height = 5.5, dpi = 300)
-  }
+# Full 28-day timing is independent of the configured treatment grace period.
+# Read all qualifying administrations so a 24-hour assignment does not truncate
+# the treatment histogram or omit later initiators.
+source(file.path(script_dir, "followup_timing_helpers.R"))
+qualifying_path <- file.path(treatment_dir, "qualifying_steroid_administrations.parquet")
+if (!file.exists(qualifying_path)) {
+  stop("Full follow-up timing requires ", qualifying_path,
+       "; run script 04 first.", call. = FALSE)
 }
+timing_ids <- as.character(cohort$hospital_block_id)
+qualifying_timing <- open_dataset(qualifying_path) |>
+  select(hospital_block_id, admin_dttm) |>
+  filter(.data$hospital_block_id %in% timing_ids) |>
+  collect() |>
+  as.data.table()
+timing_results <- build_followup_timing(
+  cohort, qualifying_timing, data_cutoff_dttm, min_cell_n
+)
+write_summary(timing_results$intervals, "death_and_treatment_six_hour_counts.csv")
+write_summary(timing_results$grace_comparison, "death_and_treatment_grace_comparison.csv")
+timing_plot <- timing_results$intervals
+cutoff_lines <- data.table(hours = c(24, 96), label = c("24 hours", "96 hours"))
+make_timing_plot <- function(x) {
+  ggplot(x, aes(x = (interval_start_hours + interval_end_hours) / 2,
+                y = n_reportable)) +
+    geom_col(width = 6, fill = "#2C7FB8", na.rm = TRUE) +
+    geom_point(data = x[count_suppressed == TRUE], aes(y = 0),
+               shape = 4, size = 1.5, color = "grey45") +
+    geom_vline(data = cutoff_lines, aes(xintercept = hours, color = label),
+               linetype = "dashed", linewidth = 0.65) +
+    scale_color_manual(values = c("24 hours" = "#D95F02", "96 hours" = "#7570B3"),
+                       name = "Grace-period cutoff") +
+    scale_x_continuous(breaks = sort(unique(c(seq(0, 672, by = 96), 24))),
+                       limits = c(0, 672), expand = expansion(mult = c(0, 0))) +
+    facet_wrap(~event_type, ncol = 1, scales = "free_y") +
+    labs(title = "Deaths and first qualifying steroid administration through day 28",
+         subtitle = paste0("Six-hour bins; each patient counted once per panel. ",
+                           "Crosses mark suppressed bins (threshold ", min_cell_n, ")."),
+         x = "Hours since respiratory-failure time zero (672 hours = 28 days)",
+         y = "Patients per six-hour interval",
+         caption = paste("Observed counts through the data cutoff; not adjusted rates.",
+                         "Treatment counts use the first qualifying administration at/after time zero;",
+                         "patients receiving steroids before time zero may be continuing treatment.")) +
+    theme(legend.position = "bottom")
+}
+ggsave(file.path(output_dir, "plot_death_and_treatment_timing.png"),
+       make_timing_plot(timing_plot), width = 12, height = 8, dpi = 300)
+ggsave(file.path(output_dir, "plot_treatment_timing.png"),
+       make_timing_plot(timing_plot[event_type != "Death"]),
+       width = 12, height = 5.5, dpi = 300)
+ggsave(file.path(output_dir, "plot_death_timing.png"),
+       make_timing_plot(timing_plot[event_type == "Death"]),
+       width = 12, height = 5.5, dpi = 300)
 
 mortality_plot <- copy(outcome_summary)[!is.na(death_28d_percent)]
 if (nrow(mortality_plot)) {

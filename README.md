@@ -356,3 +356,30 @@ the last progress message and run `sessionInfo()` in a fresh R session. This is
 a native Arrow/data.table failure rather than a catchable R condition. The
 current cohort builder avoids collecting the full ADT table and selects only
 needed hospitalization/diagnosis columns to reduce that risk.
+
+## Six-hour death and treatment timing
+
+Script `05_cohort_summary_eda.R` exports six-hour patient counts from time zero
+through 672 hours (28 days), independent of the configured treatment grace:
+
+- `plot_death_and_treatment_timing.png`: stacked death and treatment panels.
+- `plot_death_timing.png` and `plot_treatment_timing.png`: individual panels.
+- `death_and_treatment_six_hour_counts.csv`: all 112 intervals for each event.
+- `death_and_treatment_grace_comparison.csv`: observed totals within 24 and 96 hours.
+
+Vertical dashed lines mark 24 and 96 hours. Each patient contributes at most
+one death and one first qualifying steroid administration at/after time zero;
+repeated doses are not counted. Treatment comes from the full
+`qualifying_steroid_administrations.parquet` produced by script 04, not the
+grace-limited assignment. Pre-time-zero steroid recipients can therefore be
+continuing treatment; these descriptive figures do not establish new-user status.
+Treatment must occur by discharge, death (if recorded), and the data cutoff.
+Deaths after discharge are included when a patient death timestamp is available.
+The first bin is [0,6] hours; later bins are (start,end], including hour 672.
+These are observed counts, not censoring-adjusted incidence rates.
+
+Small cells and complementary cells are suppressed in CSVs and plots; crosses
+at zero mark suppressed bars, rather than actual zero counts. Grace-window
+totals are also hidden when needed to prevent reconstruction of a single small
+cell. Rerun script 05 with existing cohort and script-04 outputs; no estimator
+rerun is required. Synthetic checks: `Rscript tests/test_followup_timing.R`.
