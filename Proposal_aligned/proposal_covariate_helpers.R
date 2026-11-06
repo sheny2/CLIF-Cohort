@@ -12,10 +12,27 @@ proposal_location <- function(x) {
        x %in% c('ward','floor','medsurg','acute','acutecare','acutecareunit','generalward'),'Ward',
        default='Unknown')
 }
+# Match one latest source record per query without a non-equi join. Partitioning
+# by block and binary search bounds memory by source/query size, not match count.
+proposal_last_indices <- function(source_id,source_time,query_id,query_time) {
+ source_time <- as.numeric(source_time); query_time <- as.numeric(query_time)
+ src <- split(seq_along(source_id),as.character(source_id))
+ qry <- split(seq_along(query_id),as.character(query_id))
+ answer <- rep(NA_integer_,length(query_id))
+ for(id in intersect(names(qry),names(src))) {
+   rows <- src[[id]];rows <- rows[is.finite(source_time[rows])]
+   rows <- rows[order(source_time[rows],method="radix")]
+   ii <- qry[[id]];ii <- ii[is.finite(query_time[ii])]
+   if(!length(rows)||!length(ii)) next
+   at <- findInterval(query_time[ii],source_time[rows])
+   keep <- at>0L
+   answer[ii[keep]] <- rows[at[keep]]
+ }
+ answer
+}
 proposal_latest <- function(grid,measurement,time_col,value_col,output_col,baseline=FALSE) {
- g <- copy(as.data.table(grid))
- x <- copy(as.data.table(measurement))
- x <- x[,.(hospital_block_id=as.character(hospital_block_id),
+ g <- as.data.table(grid) # Read-only: do not copy the entire person-interval grid.
+ x <- as.data.table(measurement)[,.(hospital_block_id=as.character(hospital_block_id),
             source_time=as.POSIXct(get(time_col),tz='UTC'),
             value=suppressWarnings(as.numeric(get(value_col))))]
  if(output_col=='fio2') x[value>1 & value<=100,value:=value/100]
@@ -25,33 +42,27 @@ proposal_latest <- function(grid,measurement,time_col,value_col,output_col,basel
  }
  x <- x[!is.na(source_time)&is.finite(value)]
  bounds <- unique(g[,.(hospital_block_id,admission_dttm)])
- x <- merge(x,bounds,by='hospital_block_id')
- x <- x[source_time>=admission_dttm]
- # Baseline means nearest valid observation AT OR BEFORE time zero; no backfill.
+ admission <- bounds$admission_dttm[match(x$hospital_block_id,bounds$hospital_block_id)]
+ x <- x[!is.na(admission)&source_time>=admission]
  q <- if(baseline) unique(g[,.(hospital_block_id,index_dttm)]) else
    g[,.(hospital_block_id,m,index_dttm=decision_dttm)]
- setkey(x,hospital_block_id,source_time)
- ans <- x[q,on=.(hospital_block_id,source_time<=index_dttm),mult='last',
-          .(hospital_block_id=i.hospital_block_id,query_time=i.index_dttm,value=x.value)]
- if(baseline) ans <- merge(g[,.(hospital_block_id,m)],ans[,.(hospital_block_id,value)],by='hospital_block_id',all.x=TRUE)
- else ans[,m:=q$m]
- setnames(ans,'value',output_col)
- ans[,c('hospital_block_id','m',output_col),with=FALSE]
+ at <- proposal_last_indices(x$hospital_block_id,x$source_time,q$hospital_block_id,q$index_dttm)
+ values <- x$value[at]
+ if(baseline) values <- values[match(g$hospital_block_id,q$hospital_block_id)]
+ ans <- g[,.(hospital_block_id,m)]
+ ans[,(output_col):=values]
+ ans
 }
 proposal_sf_series <- function(spo2,respiratory,max_pair_hours=4) {
- s <- copy(as.data.table(spo2))[,.(hospital_block_id,spo2_time=as.POSIXct(recorded_dttm,tz='UTC'),sp=as.numeric(vital_value))]
- f <- copy(as.data.table(respiratory))[,.(hospital_block_id,ftime=as.POSIXct(recorded_dttm,tz='UTC'),fio=as.numeric(fio2_set))]
+ s <- as.data.table(spo2)[,.(hospital_block_id,spo2_time=as.POSIXct(recorded_dttm,tz='UTC'),sp=as.numeric(vital_value))]
+ f <- as.data.table(respiratory)[,.(hospital_block_id,ftime=as.POSIXct(recorded_dttm,tz='UTC'),fio=as.numeric(fio2_set))]
  f[fio>1 & fio<=100,fio:=fio/100]
  f <- f[is.finite(fio)&fio>=.21&fio<=1&!is.na(ftime)]
  s <- s[is.finite(sp)&sp>=50&sp<=100&!is.na(spo2_time)]
- f[,source_seconds:=as.numeric(ftime)]
- setkey(f,hospital_block_id,ftime)
- paired <- f[s,on=.(hospital_block_id,ftime<=spo2_time),mult='last',
-  .(hospital_block_id=i.hospital_block_id,recorded_dttm=i.spo2_time,
-    spo2=i.sp,fio2=x.fio,age_seconds=as.numeric(i.spo2_time)-x.source_seconds)]
- paired <- paired[is.finite(age_seconds)&age_seconds>=0&age_seconds<=max_pair_hours*3600]
- paired[,sf_ratio:=spo2/fio2]
- paired[,.(hospital_block_id,recorded_dttm,sf_ratio)]
+ at <- proposal_last_indices(f$hospital_block_id,f$ftime,s$hospital_block_id,s$spo2_time)
+ s[,`:=`(fio2=f$fio[at],age_seconds=as.numeric(spo2_time)-as.numeric(f$ftime[at]))]
+ s <- s[is.finite(age_seconds)&age_seconds>=0&age_seconds<=max_pair_hours*3600]
+ s[,.(hospital_block_id,recorded_dttm=spo2_time,sf_ratio=sp/fio2)]
 }
 proposal_process <- function(long,grace_intervals,max_missing=.70) {
  stopifnot(is.finite(max_missing),max_missing>=0,max_missing<1)

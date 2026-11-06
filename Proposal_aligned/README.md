@@ -172,3 +172,36 @@ isolated temporary directory, constructs synthetic CLIF inputs and executes ever
 stage. It verifies missing-pH exclusion, fixed baseline labs, hospital classification,
 absence of nonproposal clinical adjustments, and finite estimates. No clinical
 results have been generated locally because rclif_2_1 is not available here.
+
+## Resume after a native crash in 07
+
+Vitals/labs now use single-threaded Arrow record batches with category filters
+applied before materialization. LOCF/SF matching uses per-block binary searches
+instead of non-equi joins and no longer copies the entire person-interval grid
+for each variable. Native Arrow/data.table threading is limited to one. Logs
+report package versions, table reads, batch progress and individual LOCF stages.
+This reduces memory pressure and provides crash localization; it is not proof
+of the cause of a native error on a different HPC environment.
+
+After copying the updated folder to Discovery, rerun ONLY analysis using the
+existing run directory, for example from CLIF-Cohort:
+
+```bash
+Rscript Proposal_aligned/resume_analysis.R \
+  Proposal_aligned/results/run_20261106_123152
+```
+
+The resumer restores grace, the missingness cutoff and administrative cutoff
+from the saved run; cohort and treatment files are reused. It writes a new
+`07_resumed_<timestamp>.log`, reruns analysis outputs, records new source checksums
+and marks completion only on success. An optional second argument overrides the
+EHR source directory if it has moved. Batch size can be lowered with
+`PROPOSAL_READ_BATCH_ROWS=16384` (default 65536). Small batches bound scan
+materialization; selected records are still retained for analysis.
+
+Additional tests:
+
+```bash
+Rscript Proposal_aligned/tests/test_large_alignment.R
+Rscript Proposal_aligned/tests/test_batch_reader.R
+```

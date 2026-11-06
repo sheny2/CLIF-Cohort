@@ -22,12 +22,19 @@
 
 rm(list = ls())
 
+# Conservative native-library threading for large HPC Parquet/LOCF workloads.
+Sys.setenv(ARROW_NUM_THREADS="1",OMP_NUM_THREADS="1")
 suppressPackageStartupMessages({
   library(arrow)
   library(data.table)
   library(dplyr)
   library(ggplot2)
 })
+
+arrow::set_cpu_count(1L)
+data.table::setDTthreads(1L)
+message("Runtime: ",R.version.string,"; arrow ",as.character(packageVersion("arrow")),
+        "; data.table ",as.character(packageVersion("data.table")),"; native threads=1")
 
 # ---- Paths and fixed design --------------------------------------------------
 
@@ -144,25 +151,43 @@ required_file <- function(filename) {
   path
 }
 
-read_selected <- function(filename, columns) {
+read_selected <- function(filename,columns,category_column=NULL,categories=NULL) {
   path <- required_file(filename)
+  message("Reading ",filename,": opening dataset...")
   dataset <- open_dataset(path)
-  schema_names <- dataset$schema$names
-  missing <- setdiff(columns, schema_names)
-  if (length(missing)) {
-    stop(filename, " is missing: ", paste(missing, collapse = ", "))
-  }
+  missing <- setdiff(columns,dataset$schema$names)
+  if(length(missing)) stop(filename," is missing: ",paste(missing,collapse=", "))
   query <- dataset |> select(all_of(columns))
-  if ("hospitalization_id" %in% columns && exists("crosswalk", inherits = TRUE)) {
-    ids <- unique(get("crosswalk", inherits = TRUE)$hospitalization_id)
+  if("hospitalization_id" %in% columns && exists("crosswalk",inherits=TRUE)) {
+    ids <- unique(crosswalk$hospitalization_id)
     query <- query |> filter(.data$hospitalization_id %in% ids)
-  }
-  if ("patient_id" %in% columns && !"hospitalization_id" %in% columns &&
-      exists("cohort", inherits = TRUE)) {
-    ids <- unique(get("cohort", inherits = TRUE)$patient_id)
+  } else if("patient_id" %in% columns && exists("cohort",inherits=TRUE)) {
+    ids <- unique(cohort$patient_id)
     query <- query |> filter(.data$patient_id %in% ids)
   }
-  query |> collect() |> as.data.table()
+  if(!is.null(category_column)) {
+    # Push category filtering into Arrow instead of collecting all vital/lab types.
+    query <- query |> filter(.data[[category_column]] %in% categories)
+  }
+  batch_size <- suppressWarnings(as.integer(Sys.getenv("PROPOSAL_READ_BATCH_ROWS","65536")))
+  if(!is.finite(batch_size)||batch_size<1L) stop("Invalid PROPOSAL_READ_BATCH_ROWS")
+  message("Reading ",filename,": scanning single-threaded batches of ",batch_size," rows...")
+  scanner <- Scanner$create(query,use_threads=FALSE,batch_size=batch_size)
+  reader <- scanner$ToRecordBatchReader()
+  chunks <- list(); total <- 0L; k <- 0L
+  repeat {
+    batch <- reader$read_next_batch()
+    if(is.null(batch)) break
+    chunk <- as.data.table(as.data.frame(batch))
+    k <- k+1L;total <- total+nrow(chunk);chunks[[k]] <- chunk
+    if(k==1L||k%%25L==0L) message("Reading ",filename,": ",k," batches; ",total," rows.")
+  }
+  reader$Close()
+  answer <- if(length(chunks)) rbindlist(chunks,use.names=TRUE) else
+    as.data.table(setNames(rep(list(logical()),length(columns)),columns))
+  rm(chunks,reader,scanner,dataset,query);invisible(gc(verbose=FALSE))
+  message("Reading ",filename,": complete (",nrow(answer)," rows).")
+  answer
 }
 
 clean_code <- function(x) toupper(gsub("[^A-Z0-9]", "", as.character(x)))
@@ -597,17 +622,23 @@ grid[, decision_dttm := index_dttm + (m - 1L) * step_hours * 3600]
 
 rolling_last <- function(measurement,time_col,value_col,output_col,lookback_hours=Inf) {
   # No expiry after a valid reading: unrestricted LOCF within the hospital block.
-  proposal_latest(grid,measurement,time_col,value_col,output_col,
+  message("LOCF ",output_col,": ",nrow(measurement)," source records; ",nrow(grid)," decision rows...")
+  answer <- proposal_latest(grid,measurement,time_col,value_col,output_col,
                    baseline=output_col %in% c("glucose","albumin"))
+  message("LOCF ",output_col,": complete.")
+  answer
 }
 
 # ---- Vitals ------------------------------------------------------------------
 
 message("Aligning temperature, SpO2, and MAP...")
-vitals <- read_selected(
-  "clif_vitals.parquet",
-  c("hospitalization_id", "recorded_dttm", "vital_category", "vital_value")
-)
+vital_categories <- open_dataset(required_file("clif_vitals.parquet")) |>
+  select(vital_category) |> distinct() |> collect() |> pull(vital_category)
+vital_categories <- vital_categories[gsub("[^a-z0-9]+","_",tolower(trimws(vital_categories))) %in%
+  c("temperature","temperature_c","temp_c","spo2","map","mean_arterial_pressure")]
+vitals <- read_selected("clif_vitals.parquet",
+ c("hospitalization_id","recorded_dttm","vital_category","vital_value"),
+ "vital_category",vital_categories)
 vitals <- map_to_selected_blocks(vitals)
 vitals[, vital_category := gsub(
   "[^a-z0-9]+", "_", tolower(trimws(as.character(vital_category)))
@@ -665,19 +696,9 @@ lab_map <- list(
 )
 selected_lab_categories <- unique(unlist(lab_map, use.names = FALSE))
 if (length(selected_lab_categories)) {
-  labs <- lab_dataset |>
-    filter(
-      .data$hospitalization_id %in% crosswalk$hospitalization_id,
-      .data$lab_category %in% selected_lab_categories
-    ) |>
-    select(
-      hospitalization_id,
-      all_of(lab_time_column),
-      lab_category,
-      lab_value_numeric
-    ) |>
-    collect() |>
-    as.data.table()
+  labs <- read_selected("clif_labs.parquet",
+    c("hospitalization_id",lab_time_column,"lab_category","lab_value_numeric"),
+    "lab_category",selected_lab_categories)
   labs[, hospitalization_id := as.character(hospitalization_id)]
   setnames(labs, lab_time_column, "lab_dttm")
   labs <- map_to_selected_blocks(labs)
