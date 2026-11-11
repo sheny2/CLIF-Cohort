@@ -11,39 +11,33 @@ put(data.table(hospitalization_id=c('h1','h1','h2','orphan'),vital_category=c('t
 put(data.table(hospitalization_id='h1',lab_category=c('glucose','glucose','albumin'),lab_value_unit=c('mg/dL','mg/dL','g/dL'),lab_value_numeric=c(100,120,3),lab_collect_dttm=t),'labs')
 # High-cardinality category contents must be omitted rather than misleadingly truncated.
 put(data.table(hospitalization_id='h1',diagnosis_code=c('J18.9','J15.9','J13','J12.9')),'hospital_diagnosis')
-ok<-eda_profile(file.path(tmp,'data'),file.path(tmp,'out'),batch_rows=2,reservoir_n=100,max_categories=3,min_cell=1)
+ok<-eda_profile(file.path(tmp,'data'),file.path(tmp,'out'),batch_rows=2,min_cell=1)
 stopifnot(ok,file.exists(file.path(tmp,'out','COMPLETE.txt')))
 i<-fread(file.path(tmp,'out','table_inventory.csv'))
-stopifnot(i[table=='clif_hospitalization',rows]==3,i[table=='clif_hospitalization',unique_patients_direct]==2,
- i[table=='clif_vitals',unique_hospitalizations]==3,i[table=='clif_vitals',unique_patients_linked_from_hospitalization]==1,
- i[table=='clif_patient',unique_patients_direct]==3,all(i$parquet_fragments==1))
-n<-fread(file.path(tmp,'out','numeric_distributions.csv'))
-stopifnot(n[table=='clif_vitals'&category=='temperature',mean]==37,
- n[table=='clif_labs'&category=='glucose',median]==110)
-m<-fread(file.path(tmp,'out','column_missingness.csv'))
-stopifnot(m[table=='clif_patient'&variable=='death_dttm',n_na]==2,
- m[table=='clif_patient'&variable=='sex_category',n_blank_string]==1)
-d<-fread(file.path(tmp,'out','timestamp_ranges.csv'),colClasses='character')
-stopifnot(d[table=='clif_hospitalization'&variable=='admission_dttm',maximum_utc]=='2025-01-03 00:00:00')
-c<-fread(file.path(tmp,'out','category_frequencies.csv'))
-stopifnot(c[table=='clif_hospital_diagnosis',status]=='cardinality limit exceeded; frequencies omitted')
-s<-fread(file.path(tmp,'out','hospital_sizes_first_adt.csv'))
-stopifnot(s[site=='JHH',hospitalizations]==2,s[site=='JHH',linked_unique_patients]==1)
-for(p in list.files(file.path(tmp,'out'),pattern='csv$',full.names=TRUE)) {
- z<-fread(p,showProgress=FALSE)
- stopifnot(!any(c('patient_id','hospitalization_id') %in% names(z)))
+stopifnot(i[table=='clif_hospitalization',rows]==3,i[table=='clif_vitals',rows]==4)
+s<-fread(file.path(tmp,'out','sample_size_summary.csv'))
+stopifnot(s[quantity=='unique_patients_in_patient_table',count]==3,
+ s[quantity=='unique_patients_in_hospitalization_table',count]==2,
+ s[quantity=='unique_hospitalizations',count]==3)
+a<-fread(file.path(tmp,'out','table_availability.csv'))
+stopifnot(a[table=='clif_vitals',source_hospitalizations_with_records]==2,
+ a[table=='clif_vitals',orphan_hospitalization_ids]==1)
+d<-fread(file.path(tmp,'out','time_span.csv'))
+stopifnot(d[timestamp=='admission_dttm',first_month]=='2025-01',d[timestamp=='admission_dttm',last_month]=='2025-01')
+sites<-fread(file.path(tmp,'out','sample_size_by_site.csv'))
+stopifnot(sites[site=='JHH',hospitalizations]==2,sites[site=='JHH',unique_patients]==1)
+mo<-fread(file.path(tmp,'out','admissions_by_month.csv'))
+stopifnot(mo[month=='2025-01',hospitalizations]==3,mo[month=='2025-01',unique_patients]==2)
+md<-fread(file.path(tmp,'out','measurement_types_available.csv'))
+stopifnot(setequal(md[table=='clif_vitals',available_measurement_type],c('temperature','spo2')))
+stopifnot(length(list.files(file.path(tmp,'out','plots'),pattern='[.]png$'))==4L,
+ !file.exists(file.path(tmp,'out','numeric_distributions.csv')),
+ !file.exists(file.path(tmp,'out','category_frequencies.csv')))
+for(p in list.files(file.path(tmp,'out'),pattern='csv$',full.names=TRUE)){
+ z<-fread(p,showProgress=FALSE);stopifnot(!any(c('patient_id','hospitalization_id')%in%names(z)))
 }
-cat('PASS: exact counts/linkage/ranges/missingness, categorized numeric distributions, category overflow and no identifier columns. Outputs:',file.path(tmp,'out'),'\n')
-
-# Streaming numeric moments and bounded samples span later batches too.
-state<-eda_num_state();set.seed(19)
-for(z in split(1:20000,rep(1:20,each=1000)))eda_add_numeric(state,z,100)
-stopifnot(state$n==20000,length(state$sample)==100,abs(state$mean-mean(1:20000))<1e-8,
- abs(sqrt(state$m2/(state$n-1))-sd(1:20000))<1e-8,any(state$sample>1000))
-times<-eda_timestamp(c('2025-01-01','2025-01-01T03:00:00+03:00','2025-01-01T00:00:00Z','invalid'))
-stopifnot(all(times[1:3]==as.numeric(t)),is.na(times[4]))
-# A cardinality-limit failure must be reported as partial, not as complete data.
-partial<-suppressMessages(eda_profile(file.path(tmp,'data'),file.path(tmp,'partial'),batch_rows=2,max_ids=1,min_cell=1))
-stopifnot(!partial,file.exists(file.path(tmp,'partial','PARTIAL.txt')),
- !file.exists(file.path(tmp,'partial','COMPLETE.txt')))
-cat('PASS: full-stream moments, bounded reservoir, timestamp offsets and partial-run reporting.\n')
+# Small site/month counts are omitted rather than displayed as zero.
+ok<-eda_profile(file.path(tmp,'data'),file.path(tmp,'suppressed'),batch_rows=2,min_cell=10)
+s<-fread(file.path(tmp,'suppressed','sample_size_by_site.csv'))
+stopifnot(all(is.na(s$hospitalizations)),all(is.na(s$unique_patients)))
+cat('PASS: exact overall/site/month counts, first-ADT attribution, table coverage, variable inventory, four overview plots and small-cell suppression. Outputs:',file.path(tmp,'out'),'\n')

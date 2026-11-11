@@ -1,4 +1,4 @@
-# Explore the complete delivered rclif_2_1 extract
+# Basic rclif_2_1 availability and overview EDA
 
 Run from CLIF-Cohort on Discovery:
 
@@ -6,129 +6,101 @@ Run from CLIF-Cohort on Discovery:
 Rscript Dataset_EDA/eda_rclif_dataset.R ../rclif_2_1
 ```
 
-Or supply a NEW output directory:
+Output defaults to a fresh `Dataset_EDA/results/basic_run_<timestamp>/` directory.
+An optional second argument specifies another NEW output directory. Existing
+runs are never overwritten, so older detailed results remain unchanged.
+
+The updated script is intentionally basic. It profiles the delivered extract
+before cohort construction. It does not read numerical lab/vital results or
+medication doses, and creates no variable-by-variable distribution plots.
+
+## Overview figures
+
+At most four PNGs are created in plots/:
+
+- sample_size_by_site.png: admissions and unique patients per hospital.
+- admissions_over_time.png: monthly admissions overall and by hospital.
+- table_sizes.png: number of rows in each source table (log scale).
+- table_availability.png: percentage of source admissions with at least one row
+  in each encounter-linked table.
+
+Small site/month counts are omitted using SUMMARY_SMALL_CELL_THRESHOLD (default
+10). A plot is skipped if it has no reportable data. Exact overall sample sizes,
+table counts and record-availability denominators remain in the summaries.
+
+## Basic CSV summaries
+
+- sample_size_summary.csv: overall unique patients/admissions, duplicate and
+  missing identifier counts, and conflicting admission-patient links.
+- sample_size_by_site.csv: site-level admissions and unique patients.
+- admissions_by_month.csv and admissions_by_site_and_month.csv.
+- time_span.csv: admission/discharge coverage coarsened to first/last month,
+  with valid and missing/invalid date counts; no exact timestamps exported.
+- table_inventory.csv: source table names, row counts and number of fields.
+- variable_dictionary.csv: every field name and Arrow data type.
+- table_availability.csv: direct and linked unique-patient/admission counts,
+  record coverage and orphan encounter-ID counts.
+- measurement_types_available.csv: names of available lab, vital and numerical
+  assessment categories only; no measurement values, counts or distributions.
+- table_errors.csv: any incomplete inventory/availability steps.
+- START_HERE.md and run_notes.txt: interpretation and run settings.
+
+## Interpretation
+
+An admission is a distinct hospitalization_id, not a merged hospital block.
+Duplicate hospitalization rows are counted and deduplicated using earliest
+recorded admission for the site/month summaries. Conflicting patient links are
+flagged and excluded from linked-patient denominators. Overall direct patient
+counts in the hospitalization table still reflect all distinct recorded IDs.
+
+Hospital attribution uses the earliest valid recorded ADT hospital, with an
+available hospitalization site field as fallback; otherwise the site is Unknown.
+This is encounter attribution, not a claim of continuous ICU or hospital occupancy.
+
+A patient may have multiple admissions and appear at multiple sites/months.
+Therefore site/month patient counts should NOT be summed to infer overall unique
+patients. The patient table may contain patients absent from the hospitalization
+roster; these two sample sizes are reported separately.
+
+Table availability means at least one row exists for an admission; it does not
+establish complete measurements, low missingness within fields, or complete death
+ascertainment. This simplified version does not profile individual-field missingness
+or clinical-value distributions. Variable lists describe the supplied source, not
+a validated clinical phenotype. Medication coverage is table-level only.
+
+The extract's upstream ED/respiratory-support filters remain. Observed month
+ranges do not establish continuous coverage or a data refresh date. Non-CLIF
+shipping CSV/PDF files are not scanned.
+
+## Runtime and output handling
+
+Packages: arrow, data.table, dplyr, ggplot2. Tables are inventoried using schemas
+and row counts; only identifier/category columns are batch-scanned for availability.
+The hospitalization roster and exact identifier sets occupy memory proportional
+to unique patients/admissions. Large vitals/medication value tables are not loaded.
+Arrow and data.table run single-threaded.
+
+Optional controls:
 
 ```bash
-Rscript Dataset_EDA/eda_rclif_dataset.R \
-  /projects/emulate_icu/rclif_2_1 \
-  Dataset_EDA/results/whole_extract_first_run
-```
-
-The default output is a new timestamped directory under Dataset_EDA/results/.
-Existing output directories are refused. No original dataset or cohort scripts
-are modified. Packages: arrow, data.table, dplyr, ggplot2.
-
-This scans every immediate `clif_*.parquet` file or Parquet dataset directory.
-No adult/pneumonia/treatment/ED/respiratory-support ANALYTIC filter is applied.
-The source itself remains a selected extract; this script does not recover
-admissions or historical care omitted upstream. Non-CLIF CSV/PDF shipping files
-are not scanned. Run counts can be compared with shipped_flow_chart.csv separately.
-
-## What to open first
-
-1. START_HERE.md: guide to interpreting denominators.
-2. sample_size_summary.csv: unique patients in patient/hospitalization tables,
-   unique admissions and source row counts. Patients in the patient table can
-   differ from patients represented in the hospitalization table.
-3. table_inventory.csv: all table sizes, column counts, Parquet fragments, exact
-   distinct patient/admission IDs where present, and linked patient coverage.
-4. timestamp_ranges.csv: observed min/max for every recognized timestamp/date
-   field, including admission, discharge, measurement, administration and death.
-5. variable_dictionary.csv: every field name, Arrow type and inferred role.
-6. column_missingness.csv: exact NA counts, blank-string counts, percentages and
-   non-finite numeric values, across the WHOLE table (not our 4,497-patient cohort).
-7. category_frequencies.csv: up to 50 most frequent category/code/unit values
-   per field, with exact counts for eligible low-cardinality fields.
-8. numeric_distributions.csv: finite-value n, mean, SD, min/max, quantiles.
-   Labs, vitals, medication doses and numerical assessments are separated by
-   measurement/drug category and unit where available. No unit conversion is
-   applied; unspecified units are labeled accordingly.
-9. measurement_groups.csv: which measurements/drugs and units are present.
-10. hospital_length_of_stay.csv: nonnegative encounter LOS distribution and a
-    count of negative LOS rows. Encounters are not merged into hospital blocks.
-11. hospital_sizes_first_adt.csv: hospital-level encounter and linked patient
-    sizes, attributed to the earliest valid recorded ADT hospital. Encounters
-    without a usable hospital/time record are not included in this breakdown.
-12. table_linkage_coverage.csv: unique encounter IDs absent from the supplied
-    hospitalization roster and conflicting patient links. These are not claims
-    about records outside the extract.
-13. plots/: monthly admission/discharge/death record counts and sampled numeric
-    histograms for the 12 largest numeric groups in each table.
-
-Rows in event tables represent measurements/administrations, NOT independent
-patients. Category percentages use table rows as denominator. ADT hospital
-frequencies are ADT-row frequencies; use hospital_sizes_first_adt.csv for
-encounter attribution. Blank death timestamps normally include living patients;
-their frequency does not quantify unknown vital status. Observed date ranges do
-not establish continuous coverage, data refresh dates, or mortality ascertainment.
-Generic/arterial/venous laboratory category distinctions are preserved, not pooled
-by clinical meaning. This is a source inventory, not a validated phenotype map.
-
-## Exact statistics versus sampled distributions
-
-- Table counts, distinct IDs, missingness and timestamp extrema/counts use all
-  scanned rows and are exact for a completed table.
-- Numeric n, mean, SD, min/max also use all finite values via streaming moments.
-- Numeric quantiles and histograms use bounded uniform priority reservoirs,
-  sampled across ALL batches. These are not first-row samples. Each group retains
-  at most 2,000 numeric observations by default; the report states sample size
-  and whether all finite values fit in that sample.
-- Histograms show sampled observation counts, not estimated patient totals.
-- If a category field exceeds the configured distinct-value limit, its entire
-  frequency table is omitted and flagged. A first-batch/top-value approximation
-  is never mislabeled as an exact frequency table.
-- If the numeric-group limit is reached, inventory flags it. Profiles then cover
-  only the retained groups; increase the limit for exhaustive group summaries.
-- Patient/admission IDs are held transiently for exact counts and linkage, but
-  their VALUES are never written. Identifier names appear only as schema metadata.
-  No row-level samples or free-text contents are exported.
-
-## Memory, runtime and errors
-
-Arrow and data.table run single-threaded. Tables are read in record batches.
-Numeric reservoirs, category dictionaries and number of numeric groups are capped.
-Exact ID sets and the hospitalization/ADT mapping use memory proportional to the
-number of distinct IDs: this part is NOT constant-memory. Default safety limit is
-2 million distinct IDs per set; a table exceeding it is marked failed rather than
-silently reporting approximate counts. Full-dataset scans can take substantial time.
-All columns are scanned to characterize missingness, including nonexported text
-fields, so very large text/nested fields can still increase batch memory use.
-
-Optional environment settings:
-
-```bash
-export EDA_BATCH_ROWS=65536          # lower to 16384 if necessary
-export EDA_RESERVOIR_N=2000          # increase for more precise quantiles
-export EDA_MAX_CATEGORIES=1000       # field cardinality before frequencies omitted
-export EDA_MAX_NUMERIC_GROUPS=2000   # per-table measurement/drug/unit groups
-export EDA_MAX_UNIQUE_IDS=2000000    # raise only if HPC memory permits
+export EDA_BATCH_ROWS=65536
+export EDA_MAX_UNIQUE_IDS=2000000
 export SUMMARY_SMALL_CELL_THRESHOLD=10
 ```
 
-Outputs are checkpointed after each table. Recoverable R errors are recorded in
-table_errors.csv and processing continues; PARTIAL.txt plus a nonzero exit means
-the result must not be interpreted as a complete dataset profile. COMPLETE.txt
-means all discovered tables and available derived summaries completed. Native
-library segmentation faults cannot be caught by R; inspect the last logged table.
+The first limit also protects hospitalization-roster row size. Older numeric
+reservoir/category-profile environment settings no longer apply. COMPLETE.txt
+means all steps finished; PARTIAL.txt and table_errors.csv indicate missing
+summaries. A missing/invalid core hospitalization roster stops execution.
 
-Low-frequency category values/counts, numeric moments/quantiles for small groups,
-and small histogram cells are suppressed. Overall/group counts, dates and
-missingness remain exact. ALL outputs are
-sensitive working summaries: keep them on Discovery pending usual disclosure
-review. Suppression here is not a guarantee that outputs are approved for export.
+No patient/encounter identifier VALUES, row-level observations, free-text values,
+exact dates or detailed medication/measurement distributions are exported.
+Identifiers remain transiently in memory for exact counting/linkage. These are
+simpler working outputs, not automatic clearance to download or share; follow
+normal project disclosure review.
 
-Timestamp extrema use typed Arrow timestamps/dates when available. String date
-fields support ISO-like timestamps, explicit Z/numeric UTC offsets and date-only
-values; timestamps without an offset are assumed UTC. Unparseable nonmissing
-strings are counted. Verify source timezone conventions before temporal analysis.
-
-## Test without clinical data
+Test with synthetic inputs only:
 
 ```bash
 Rscript Dataset_EDA/tests/test_dataset_eda.R
 ```
-
-The test constructs small synthetic CLIF tables, scans them with tiny batches,
-checks exact sample sizes, linkage, missingness, dates, unit-stratified numeric
-statistics, high-cardinality handling and aggregate-only export, and renders plots.
-The actual rclif_2_1 source is not present in this local workspace.

@@ -1,31 +1,23 @@
 #!/usr/bin/env Rscript
-# Profile every CLIF Parquet table in the delivered extract, without cohort filters.
-# No individual records or patient/encounter ID values are exported.
+# Basic overview of the delivered CLIF extract. No analytic cohort filters.
 Sys.setenv(ARROW_NUM_THREADS='1',OMP_NUM_THREADS='1')
 suppressPackageStartupMessages({library(arrow);library(data.table);library(dplyr);library(ggplot2)})
 arrow::set_cpu_count(1L);data.table::setDTthreads(1L)
-
-eda_blank <- function(x) is.na(x) | (is.character(x) & !is.na(x) & trimws(x)=='')
-eda_id_state <- function() {e<-new.env(parent=emptyenv());e$values<-new.env(hash=TRUE,parent=emptyenv());e$n<-0L;e}
-eda_add_ids <- function(e,x,limit) {
- x<-unique(as.character(x[!eda_blank(x)]))
- for(v in x) if(!exists(v,e$values,inherits=FALSE)) {
-  if(e$n>=limit) stop('Exact-ID limit exceeded; raise EDA_MAX_UNIQUE_IDS if memory permits.')
+eda_blank <- function(x) is.na(x)|(is.character(x)&!is.na(x)&trimws(x)=='')
+eda_id_state <- function(){e<-new.env(parent=emptyenv());e$values<-new.env(hash=TRUE,parent=emptyenv());e$n<-0L;e}
+eda_add_ids <- function(e,x,limit){
+ for(v in unique(as.character(x[!eda_blank(x)])))if(!exists(v,e$values,inherits=FALSE)){
+  if(e$n>=limit)stop('EDA_MAX_UNIQUE_IDS exceeded; raise only if memory permits.')
   assign(v,TRUE,e$values);e$n<-e$n+1L
- }
- invisible(NULL)
+ };invisible(NULL)
 }
-eda_num_state <- function() {e<-new.env(parent=emptyenv());e$n<-0;e$mean<-0;e$m2<-0;e$min<-Inf;e$max<--Inf;e$sample<-numeric();e$priority<-numeric();e}
-eda_add_numeric <- function(e,x,k) {
- x<-as.numeric(x);x<-x[is.finite(x)];n<-length(x)
- if(!n) return(invisible(NULL))
- mu<-mean(x);delta<-mu-e$mean;total<-e$n+n
- e$m2<-e$m2+sum((x-mu)^2)+delta^2*e$n*n/total
- e$mean<-e$mean+delta*n/total;e$n<-total;e$min<-min(e$min,min(x));e$max<-max(e$max,max(x))
- # Uniform bounded priority reservoir across ALL batches, not just the first rows.
- priority<-runif(n);take<-order(priority)[seq_len(min(n,k))]
- values<-c(e$sample,x[take]);priority<-c(e$priority,priority[take]);keep<-order(priority)[seq_len(min(length(values),k))]
- e$sample<-values[keep];e$priority<-priority[keep]
+eda_write <- function(x,path){x<-as.data.table(x);if(!ncol(x))x<-data.table(table=character());fwrite(x,path,na='')}
+eda_bind <- function(x)if(length(x))rbindlist(x,fill=TRUE)else data.table()
+eda_scan <- function(path,columns,callback,batch_rows){
+ ds<-open_dataset(path);q<-ds |> select(all_of(columns))
+ r<-Scanner$create(q,use_threads=FALSE,batch_size=batch_rows)$ToRecordBatchReader()
+ on.exit(r$Close(),add=TRUE)
+ repeat{b<-r$read_next_batch();if(is.null(b))break;callback(as.data.table(as.data.frame(b)))}
  invisible(NULL)
 }
 eda_timestamp <- function(x) {
@@ -45,284 +37,180 @@ eda_timestamp <- function(x) {
  }
  rep(NA_real_,length(x))
 }
-eda_has_time <- function(name,type) grepl('timestamp|date32|date64',type,ignore.case=TRUE)||grepl('(_dttm|_datetime|_date)$',name)
-eda_is_id <- function(name) grepl('(^|_)(patient|hospitalization|hospital_block|encounter|visit|record|row)_id$|^id$',name)
-eda_is_category <- function(name) !eda_is_id(name) && (grepl('(_category|_group|_code|_format|_unit|_units)$',name)||name %in% c('hospital_id','site_id','admission_hospital_id','poa_present','diagnosis_primary','tracheostomy'))
-eda_is_numeric <- function(name,type) !eda_is_id(name)&&!eda_has_time(name,type)&&grepl('int|float|double|decimal|bool',type,ignore.case=TRUE)
-eda_write <- function(x,path) {x<-as.data.table(x);if(!ncol(x))x<-data.table(table=character());fwrite(x,path,na='')}
-eda_bind <- function(x) if(length(x)) rbindlist(x,fill=TRUE) else data.table()
-
-eda_profile <- function(data_dir,output_dir,batch_rows=65536L,reservoir_n=2000L,
-                        max_categories=1000L,max_groups=2000L,max_ids=2000000L,min_cell=10L,seed=20261110L) {
- stopifnot(dir.exists(data_dir),batch_rows>0,reservoir_n>0,max_categories>0,max_groups>0,max_ids>0,min_cell>=1)
- if(dir.exists(output_dir)) stop('OUTPUT_DIR already exists; choose a new directory to avoid mixing runs.')
- dir.create(output_dir,recursive=TRUE);dir.create(file.path(output_dir,'plots'))
- set.seed(seed)
+eda_profile <- function(data_dir,output_dir,batch_rows=65536L,max_ids=2000000L,min_cell=10L){
+ stopifnot(dir.exists(data_dir),is.finite(batch_rows),batch_rows>0,is.finite(max_ids),max_ids>0,is.finite(min_cell),min_cell>=1)
+ if(dir.exists(output_dir))stop('OUTPUT_DIR exists; choose a fresh directory.')
  paths<-list.files(data_dir,pattern='^clif_.*[.]parquet$',full.names=TRUE)
- if(!length(paths)) stop('No clif_*.parquet files or directories were found in ',data_dir)
- # Hospitalization first permits linked patient coverage for child tables.
- paths<-paths[order(basename(paths)!='clif_hospitalization.parquet',basename(paths))]
- roster<-new.env(hash=TRUE,parent=emptyenv());roster_conflicts<-eda_id_state();roster_complete<-FALSE
- totals<-list();schema_all<-list();missing_all<-list();date_all<-list();calendar_all<-list()
- categories_all<-list();numeric_all<-list();hist_all<-list();domains_all<-list();errors<-list();links_all<-list()
- put_outputs<-function() {
-  for(nm in c('totals','schema_all','missing_all','date_all','calendar_all','categories_all','numeric_all','hist_all','domains_all','links_all','errors')) {
-   filename<-c(totals='table_inventory.csv',schema_all='variable_dictionary.csv',missing_all='column_missingness.csv',
-    date_all='timestamp_ranges.csv',calendar_all='timestamp_counts_by_month.csv',categories_all='category_frequencies.csv',
-    numeric_all='numeric_distributions.csv',hist_all='sampled_numeric_histograms.csv',domains_all='measurement_groups.csv',
-    links_all='table_linkage_coverage.csv',errors='table_errors.csv')[[nm]]
-   z<-eda_bind(get(nm,inherits=TRUE))
-   if(nm=='errors'&&!ncol(z))z<-data.table(table=character(),error=character())
-   eda_write(z,file.path(output_dir,filename))
+ if(!length(paths))stop('No clif_*.parquet tables found.')
+ names(paths)<-sub('[.]parquet$','',basename(paths))
+ if(!'clif_hospitalization'%in%names(paths))stop('clif_hospitalization.parquet is required for sample sizes and coverage.')
+ dir.create(file.path(output_dir,'plots'),recursive=TRUE)
+ dict<-list();inventory<-list();coverage<-list();measurements<-list();errors<-list()
+ # Metadata/row counts only: do not load numeric measurements or medication doses.
+ for(tab in names(paths))tryCatch({
+  message('Inventory: ',tab)
+  ds<-open_dataset(paths[[tab]]);cols<-ds$schema$names
+  types<-vapply(ds$schema$fields,function(f)f$type$ToString(),character(1))
+  dict[[tab]]<-data.table(table=tab,variable=cols,arrow_type=types)
+  count<-ds |> summarise(rows=n()) |> collect()
+  inventory[[tab]]<-data.table(table=tab,rows=as.numeric(count$rows),columns=length(cols),status='complete')
+ },error=function(e){errors[[tab]]<<-data.table(table=tab,error=conditionMessage(e));inventory[[tab]]<<-data.table(table=tab,rows=NA_real_,columns=NA_integer_,status='failed')})
+ eda_write(eda_bind(dict),file.path(output_dir,'variable_dictionary.csv'))
+ eda_write(eda_bind(inventory),file.path(output_dir,'table_inventory.csv'))
+ hp<-paths[['clif_hospitalization']];hc<-open_dataset(hp)$schema$names
+ required<-c('hospitalization_id','patient_id','admission_dttm','discharge_dttm')
+ if(!all(required%in%hc))stop('Hospitalization table missing: ',paste(setdiff(required,hc),collapse=', '))
+ site_col<-intersect(c('admission_hospital_id','hospital_id','site_id','admission_hospital_name','hospital_name'),hc)
+ site_col<-if(length(site_col))site_col[1]else character()
+ chunks<-list();k<-0L
+ eda_scan(hp,c(required,site_col),function(x){k<<-k+1L;chunks[[k]]<<-x},batch_rows)
+ h<-if(length(chunks))rbindlist(chunks)else as.data.table(setNames(rep(list(logical()),length(c(required,site_col))),c(required,site_col)));rm(chunks)
+ if(nrow(h)>max_ids)stop('Hospitalization row safety limit exceeded; increase EDA_MAX_UNIQUE_IDS if appropriate.')
+ h[,`:=`(hospitalization_id=as.character(hospitalization_id),patient_id=as.character(patient_id),
+          admission_seconds=eda_timestamp(admission_dttm),discharge_seconds=eda_timestamp(discharge_dttm))]
+ missing_hospital_ids<-sum(eda_blank(h$hospitalization_id));missing_patient_ids<-sum(eda_blank(h$patient_id))
+ hospital_patients<-unique(h$patient_id[!eda_blank(h$patient_id)])
+ raw_hospital_rows<-nrow(h)
+ # Date ranges are coarsened to months in the export; exact timestamps stay in memory.
+ spans<-rbindlist(lapply(c('admission','discharge'),function(v){
+  z<-h[[paste0(v,'_seconds')]];ok<-is.finite(z)
+  data.table(timestamp=paste0(v,'_dttm'),n_with_valid_date=sum(ok),n_missing_or_invalid=sum(!ok),
+   first_month=if(any(ok))format(as.POSIXct(min(z[ok]),origin='1970-01-01',tz='UTC'),'%Y-%m')else NA_character_,
+   last_month=if(any(ok))format(as.POSIXct(max(z[ok]),origin='1970-01-01',tz='UTC'),'%Y-%m')else NA_character_)
+ }))
+ eda_write(spans,file.path(output_dir,'time_span.csv'))
+ conflicts<-h[!eda_blank(hospitalization_id)&!eda_blank(patient_id),.(n=uniqueN(patient_id)),by=hospitalization_id][n>1,hospitalization_id]
+ duplicate_hospital_rows<-h[!eda_blank(hospitalization_id),.N]-uniqueN(h$hospitalization_id[!eda_blank(h$hospitalization_id)])
+ setorder(h,hospitalization_id,admission_seconds,na.last=TRUE)
+ h<-h[!eda_blank(hospitalization_id)&!duplicated(hospitalization_id)]
+ h[hospitalization_id%in%conflicts,patient_id:=NA_character_]
+ h[,site:=if(length(site_col))as.character(get(site_col))else NA_character_]
+ # Earliest observed ADT site is the preferred attribution, with source-field fallback.
+ attribution<-'hospitalization field or Unknown'
+ if('clif_adt'%in%names(paths))tryCatch({
+  ac<-open_dataset(paths[['clif_adt']])$schema$names
+  if(all(c('hospitalization_id','hospital_id','in_dttm')%in%ac)){
+   first<-new.env(hash=TRUE,parent=emptyenv());nfirst<-0L
+   eda_scan(paths[['clif_adt']],c('hospitalization_id','hospital_id','in_dttm'),function(x){
+    x[,`:=`(hospitalization_id=as.character(hospitalization_id),seconds=eda_timestamp(in_dttm))]
+    x<-x[hospitalization_id%in%h$hospitalization_id&!eda_blank(hospital_id)&is.finite(seconds)]
+    setorder(x,hospitalization_id,seconds);x<-x[!duplicated(hospitalization_id)]
+    for(i in seq_len(nrow(x))){id<-x$hospitalization_id[i];z<-list(time=x$seconds[i],site=as.character(x$hospital_id[i]))
+     if(!exists(id,first,inherits=FALSE)){assign(id,z,first);nfirst<<-nfirst+1L}
+     else if(z$time<get(id,first)$time)assign(id,z,first)
+    }
+   },batch_rows)
+   assigned<-vapply(h$hospitalization_id,function(id)if(exists(id,first,inherits=FALSE))get(id,first)$site else NA_character_,character(1))
+   h[!is.na(assigned),site:=assigned[!is.na(assigned)]]
+   attribution<-'earliest valid recorded ADT hospital, with hospitalization-field fallback'
   }
+ },error=function(e){errors[['site_attribution']]<<-data.table(table='site_attribution',error=conditionMessage(e))})
+ h[is.na(site)|trimws(site)=='',site:='Unknown']
+ patient_table_ids<-eda_id_state()
+ # Scan identifier columns only for table-level availability; category LABELS only
+ # identify measurement types. No lab/vital values or drug doses are read.
+ for(tab in names(paths))tryCatch({
+  message('Availability: ',tab)
+  ds<-open_dataset(paths[[tab]]);cols<-ds$schema$names
+  idcols<-intersect(c('patient_id','hospitalization_id'),cols)
+  typecol<-intersect(c('lab_category','vital_category','assessment_category'),cols)
+  typecol<-if(length(typecol))typecol[1]else character()
+  if(!length(c(idcols,typecol)))return_value<-NULL
+  else{
+   pset<-eda_id_state();hset<-eda_id_state();typeset<-eda_id_state()
+   eda_scan(paths[[tab]],c(idcols,typecol),function(x){
+    if('patient_id'%in%idcols)eda_add_ids(pset,x$patient_id,max_ids)
+    if('hospitalization_id'%in%idcols)eda_add_ids(hset,x$hospitalization_id,max_ids)
+    if(length(typecol))eda_add_ids(typeset,x[[typecol]],max_ids)
+   },batch_rows)
+   if(tab=='clif_patient')patient_table_ids<-pset
+   represented<-ls(hset$values,all.names=TRUE);known<-intersect(represented,h$hospitalization_id)
+   linked<-h[hospitalization_id%in%known,uniqueN(patient_id[!is.na(patient_id)])]
+   coverage[[tab]]<-data.table(table=tab,
+    unique_patients_direct=if('patient_id'%in%idcols)pset$n else NA_real_,
+    unique_hospitalizations_direct=if('hospitalization_id'%in%idcols)hset$n else NA_real_,
+    source_hospitalizations_with_records=if('hospitalization_id'%in%idcols)length(known)else NA_real_,
+    hospitalization_coverage_percent=if('hospitalization_id'%in%idcols&&nrow(h)>0)100*length(known)/nrow(h)else NA_real_,
+    linked_patients_with_records=if('hospitalization_id'%in%idcols)linked else NA_real_,
+    orphan_hospitalization_ids=if('hospitalization_id'%in%idcols)length(setdiff(represented,h$hospitalization_id))else NA_real_)
+   if(length(typecol))measurements[[tab]]<-data.table(table=tab,category_field=typecol,
+      available_measurement_type=ls(typeset$values,all.names=TRUE))
+  }
+ },error=function(e){errors[[paste0(tab,'_coverage')]]<<-data.table(table=tab,error=conditionMessage(e))})
+ summary<-data.table(quantity=c('unique_patients_in_patient_table','unique_patients_in_hospitalization_table',
+   'unique_hospitalizations','source_hospitalization_rows','duplicate_hospitalization_rows',
+   'hospitalization_rows_missing_id','hospitalization_rows_missing_patient_id','hospitalization_ids_with_conflicting_patient_links'),
+  count=c(if('clif_patient'%in%names(coverage))patient_table_ids$n else NA_real_,length(hospital_patients),nrow(h),raw_hospital_rows,
+          duplicate_hospital_rows,missing_hospital_ids,missing_patient_ids,length(conflicts)))
+ eda_write(summary,file.path(output_dir,'sample_size_summary.csv'))
+ eda_write(eda_bind(coverage),file.path(output_dir,'table_availability.csv'))
+ eda_write(eda_bind(measurements),file.path(output_dir,'measurement_types_available.csv'))
+ site<-h[,.(hospitalizations=.N,unique_patients=uniqueN(patient_id[!is.na(patient_id)]),
+             admissions_with_unknown_patient=sum(is.na(patient_id))),by=site]
+ site[,`:=`(hospitalizations=ifelse(hospitalizations<min_cell,NA_real_,hospitalizations),
+             unique_patients=ifelse(unique_patients<min_cell,NA_real_,unique_patients))]
+ eda_write(site,file.path(output_dir,'sample_size_by_site.csv'))
+ calendar<-h[is.finite(admission_seconds),.(site,patient_id,
+    month=format(as.POSIXct(admission_seconds,origin='1970-01-01',tz='UTC'),'%Y-%m'))]
+ bytime<-calendar[,.(hospitalizations=.N,unique_patients=uniqueN(patient_id[!is.na(patient_id)])),by=.(site,month)]
+ alltime<-calendar[,.(hospitalizations=.N,unique_patients=uniqueN(patient_id[!is.na(patient_id)])),by=month]
+ bytime[,`:=`(hospitalizations=ifelse(hospitalizations<min_cell,NA_real_,hospitalizations),
+               unique_patients=ifelse(unique_patients<min_cell,NA_real_,unique_patients))]
+ alltime[,`:=`(hospitalizations=ifelse(hospitalizations<min_cell,NA_real_,hospitalizations),
+                unique_patients=ifelse(unique_patients<min_cell,NA_real_,unique_patients))]
+ eda_write(bytime,file.path(output_dir,'admissions_by_site_and_month.csv'))
+ eda_write(alltime,file.path(output_dir,'admissions_by_month.csv'))
+ theme_set(theme_minimal(base_size=12))
+ sites_long<-melt(site,id.vars='site',measure.vars=c('hospitalizations','unique_patients'),variable.name='measure',value.name='n')
+ sites_long[,measure:=factor(measure,levels=c('hospitalizations','unique_patients'),labels=c('Hospitalizations','Unique patients'))]
+ if(nrow(sites_long)&&any(is.finite(sites_long$n))){
+  pp<-ggplot(sites_long,aes(site,n))+geom_col(fill='#2878A8',na.rm=TRUE)+
+   geom_text(aes(label=format(n,big.mark=',',trim=TRUE)),vjust=-.3,na.rm=TRUE)+
+   scale_y_continuous(expand=expansion(mult=c(0,.12)))+facet_wrap(~measure,scales='free_y')+
+   labs(title='Sample size by hospital',subtitle='Patient counts are unique within each site; patients may appear at multiple sites.',x='Hospital',y='Count')
+  ggsave(file.path(output_dir,'plots','sample_size_by_site.png'),pp,width=10,height=5,dpi=160)
  }
- for(path in paths) {
-  table<-sub('[.]parquet$','',basename(path));message('Profiling ',table,' ...')
-  tryCatch({
-   ds<-open_dataset(path);cols<-ds$schema$names
-   types<-vapply(ds$schema$fields,function(f)f$type$ToString(),character(1))
-   names(types)<-cols
-   schema_all[[table]]<-data.table(table=table,variable=cols,arrow_type=types,
-    role=ifelse(vapply(cols,eda_is_id,logical(1)),'identifier',ifelse(mapply(eda_has_time,cols,types),'timestamp',
-     ifelse(vapply(cols,eda_is_category,logical(1)),'coded/category',ifelse(mapply(eda_is_numeric,cols,types),'numeric','other/text')))))
-   ids<-lapply(intersect(c('patient_id','hospitalization_id'),cols),function(v)eda_id_state());names(ids)<-intersect(c('patient_id','hospitalization_id'),cols)
-   categories<-new.env(hash=TRUE,parent=emptyenv());numbers<-new.env(hash=TRUE,parent=emptyenv())
-   numeric_meta<-list();num_count<-0L;groups_omitted<-0L
-   times<-list();monthly<-list();missing<-setNames(numeric(length(cols)),cols);blanks<-missing;nonfinite<-missing
-   row_n<-0;n_batch<-0;hospital_orphans<-eda_id_state();patient_orphans<-NULL
-   time_cols<-cols[mapply(eda_has_time,cols,types)]
-   cat_cols<-cols[vapply(cols,eda_is_category,logical(1))]
-   num_cols<-cols[mapply(eda_is_numeric,cols,types)]
-   for(v in cat_cols) {e<-new.env(parent=emptyenv());e$counts<-integer();e$overflow<-FALSE;assign(v,e,categories)}
-   # Domain-specific numeric profiles separate laboratory/vital/medication types and units.
-   category_col<-intersect(c('lab_category','vital_category','med_category','assessment_category'),cols)
-   category_col<-if(length(category_col)) category_col[1] else NULL
-   unit_col<-intersect(c('lab_value_unit','lab_unit','vital_unit','vital_value_unit','med_dose_unit','unit'),cols)
-   unit_col<-if(length(unit_col)) unit_col[1] else NULL
-   domain_values<-intersect(c('lab_value_numeric','vital_value','med_dose','numerical_value'),num_cols)
-   reader<-Scanner$create(ds,use_threads=FALSE,batch_size=batch_rows)$ToRecordBatchReader()
-   repeat {
-    b<-reader$read_next_batch();if(is.null(b)) break
-    x<-as.data.table(as.data.frame(b))
-    for(v in names(x)[vapply(x,is.factor,logical(1))]) set(x,j=v,value=as.character(x[[v]]))
-    row_n<-row_n+nrow(x);n_batch<-n_batch+1L
-    for(v in cols) {
-     z<-x[[v]];missing[v]<-missing[v]+sum(is.na(z))
-     if(is.character(z)) blanks[v]<-blanks[v]+sum(!is.na(z)&trimws(z)=='')
-     if(is.numeric(z)) nonfinite[v]<-nonfinite[v]+sum(!is.na(z)&!is.finite(z))
-    }
-    for(v in names(ids)) eda_add_ids(ids[[v]],x[[v]],max_ids)
-    if(table=='clif_hospitalization' && all(c('patient_id','hospitalization_id') %in% cols)) {
-     pairs<-unique(x[!eda_blank(patient_id)&!eda_blank(hospitalization_id),.(hospitalization_id=as.character(hospitalization_id),patient_id=as.character(patient_id))])
-     for(j in seq_len(nrow(pairs))) {
-      h<-pairs$hospitalization_id[j];p<-pairs$patient_id[j]
-      if(exists(h,roster,inherits=FALSE)&&!identical(get(h,roster),p)) eda_add_ids(roster_conflicts,h,max_ids)
-      else assign(h,p,roster)
-     }
-    }
-    for(v in time_cols) {
-     t<-eda_timestamp(x[[v]]);ok<-is.finite(t)
-     if(is.null(times[[v]])) times[[v]]<-c(n=0,invalid=0,min=Inf,max=-Inf)
-     times[[v]]['invalid']<-times[[v]]['invalid']+sum(!eda_blank(x[[v]])&!ok)
-     if(any(ok)) {
-      times[[v]]['n']<-times[[v]]['n']+sum(ok)
-      times[[v]]['min']<-min(times[[v]]['min'],min(t[ok]));times[[v]]['max']<-max(times[[v]]['max'],max(t[ok]))
-      mo<-format(as.POSIXct(t[ok],origin='1970-01-01',tz='UTC'),'%Y-%m')
-      cc<-data.table(month=mo)[,.N,by=month]
-      monthly[[v]]<-rbindlist(list(monthly[[v]],cc))[,.(N=sum(N)),by=month]
-     }
-    }
-    for(v in cat_cols) {
-     e<-get(v,categories);if(e$overflow) next
-     z<-x[[v]];cc<-data.table(value=as.character(z[!eda_blank(z)]))[,.N,by=value]
-     values<-union(names(e$counts),cc$value)
-     if(length(values)>max_categories) {e$overflow<-TRUE;e$counts<-integer();next}
-     old<-setNames(rep(0,length(values)),values);old[names(e$counts)]<-e$counts
-     old[cc$value]<-old[cc$value]+cc$N;e$counts<-old
-    }
-    for(v in num_cols) {
-     groups<-if(!is.null(category_col)&&v %in% domain_values) as.character(x[[category_col]]) else rep('ALL',nrow(x))
-     units<-if(!is.null(unit_col)&&v %in% domain_values) as.character(x[[unit_col]]) else rep('not supplied/applicable',nrow(x))
-     groups[is.na(groups)|groups=='']<-'Unknown category';units[is.na(units)|units=='']<-'Unknown unit'
-     chunks<-split(seq_len(nrow(x)),paste(groups,units,sep='\034'))
-     for(ii in chunks) {
-      group<-groups[ii[1]];unit<-units[ii[1]];key<-paste(v,group,unit,sep='\035')
-      if(!exists(key,numbers,inherits=FALSE)) {
-       if(num_count>=max_groups) {groups_omitted<-groups_omitted+1L;next}
-       num_count<-num_count+1L;assign(key,eda_num_state(),numbers)
-       numeric_meta[[key]]<-list(variable=v,category=group,unit=unit)
-      }
-      eda_add_numeric(get(key,numbers),x[[v]][ii],reservoir_n)
-     }
-    }
-    rm(x,b);if(n_batch%%25L==0L) {message(table,': ',format(row_n,big.mark=','),' rows');invisible(gc(verbose=FALSE))}
-   }
-   reader$Close()
-   # Derived linkage is exact for IDs represented in the supplied hospitalization roster.
-   if(table=='clif_hospitalization') roster_complete<-TRUE
-   linked<-eda_id_state()
-   hosp_ids<-if('hospitalization_id' %in% names(ids)) ls(ids$hospitalization_id$values,all.names=TRUE) else character()
-   if(roster_complete) for(h in hosp_ids) {
-    if(exists(h,roster_conflicts$values,inherits=FALSE)) next
-    if(exists(h,roster,inherits=FALSE)) eda_add_ids(linked,get(h,roster),max_ids) else eda_add_ids(hospital_orphans,h,max_ids)
-   }
-   totals[[table]]<-data.table(table=table,rows=row_n,columns=length(cols),parquet_fragments=if(dir.exists(path))length(list.files(path,pattern='[.]parquet$',recursive=TRUE))else 1L,
-    unique_patients_direct=if('patient_id' %in% names(ids))ids$patient_id$n else NA_real_,
-    unique_hospitalizations=if('hospitalization_id' %in% names(ids))ids$hospitalization_id$n else NA_real_,
-    unique_patients_linked_from_hospitalization=if(length(hosp_ids)&&roster_complete)linked$n else NA_real_,
-    numeric_group_limit_reached=groups_omitted>0,status='complete')
-   links_all[[table]]<-data.table(table=table,unique_hospitalization_ids_absent_from_roster=if(roster_complete)hospital_orphans$n else NA_real_,roster_complete=roster_complete,
-    roster_conflicting_patient_links=roster_conflicts$n)
-   missing_all[[table]]<-data.table(table=table,variable=cols,rows=row_n,n_na=missing,n_blank_string=blanks,
-    missing_or_blank_percent=if(row_n)100*(missing+blanks)/row_n else NA_real_,n_nonfinite_nonmissing=nonfinite)
-   date_all[[table]]<-eda_bind(lapply(names(times),function(v) {
-    t<-times[[v]];data.table(table=table,variable=v,n_valid=t['n'],n_unparseable=t['invalid'],
-     minimum_utc=if(t['n']>0)format(as.POSIXct(t['min'],origin='1970-01-01',tz='UTC'),'%Y-%m-%d %H:%M:%S')else NA_character_,
-     maximum_utc=if(t['n']>0)format(as.POSIXct(t['max'],origin='1970-01-01',tz='UTC'),'%Y-%m-%d %H:%M:%S')else NA_character_)
-   }))
-   calendar_all[[table]]<-eda_bind(lapply(names(monthly),function(v) data.table(table=table,variable=v,monthly[[v]])))
-   categories_all[[table]]<-eda_bind(lapply(cat_cols,function(v) {
-    e<-get(v,categories)
-    if(e$overflow) return(data.table(table=table,variable=v,value=NA_character_,n=NA_real_,percent_of_table=NA_real_,status='cardinality limit exceeded; frequencies omitted'))
-    cc<-data.table(value=names(e$counts),n=as.numeric(e$counts));setorder(cc,-n,value)
-    cc<-head(cc,50L);cc[,status:=ifelse(n<min_cell,'small cell suppressed','exact top frequency')]
-    cc[n<min_cell,`:=`(value=NA_character_,n=NA_real_)]
-    cc[,`:=`(table=table,variable=v,percent_of_table=100*n/max(1,row_n))];cc
-   }))
-   numeric_all[[table]]<-eda_bind(lapply(names(numeric_meta),function(key) {
-    e<-get(key,numbers);meta<-numeric_meta[[key]];q<-if(e$n>=min_cell)quantile(e$sample,c(.01,.05,.25,.5,.75,.95,.99))else rep(NA_real_,7)
-    data.table(table=table,variable=meta$variable,category=meta$category,unit=meta$unit,n_finite=e$n,
-     mean=if(e$n>=min_cell)e$mean else NA_real_,sd=if(e$n>=max(2,min_cell))sqrt(e$m2/(e$n-1))else NA_real_,
-     minimum=if(e$n>=min_cell)e$min else NA_real_,maximum=if(e$n>=min_cell)e$max else NA_real_,
-     p01=q[1],p05=q[2],p25=q[3],median=q[4],p75=q[5],p95=q[6],p99=q[7],sample_n=length(e$sample),
-     quantiles=if(e$n<=reservoir_n)'exact (all finite values retained)'else'uniform reservoir estimate')
-   }))
-   domains_all[[table]]<-copy(numeric_all[[table]])[,intersect(c('table','variable','category','unit','n_finite'),names(numeric_all[[table]])),with=FALSE]
-   hist_rows<-list()
-   # Only the largest 12 numeric groups per table are plotted/exported as histograms.
-   keys<-names(numeric_meta);if(length(keys))keys<-keys[order(vapply(keys,function(k)get(k,numbers)$n,numeric(1)),decreasing=TRUE)]
-   for(key in head(keys,12)) {
-    e<-get(key,numbers);meta<-numeric_meta[[key]]
-    if(length(e$sample)<max(2,min_cell))next
-    h<-hist(e$sample,breaks=30,plot=FALSE)
-    hist_rows[[key]]<-data.table(table=table,variable=meta$variable,category=meta$category,unit=meta$unit,
-     left=head(h$breaks,-1),right=tail(h$breaks,-1),sample_count=ifelse(h$counts>0&h$counts<min_cell,NA_real_,h$counts),
-     sample_n=length(e$sample),population_finite=e$n)
-   }
-   hist_all[[table]]<-eda_bind(hist_rows)
-   if(nrow(hist_all[[table]])) {
-    hh<-copy(hist_all[[table]]);hh[,panel:=paste(variable,category,unit,sep=' | ')]
-    pp<-ggplot(hh,aes(x=(left+right)/2,y=sample_count))+geom_col(aes(width=right-left),fill='#2878A8',na.rm=TRUE)+
-     facet_wrap(~panel,scales='free',ncol=3)+theme_minimal(base_size=10)+
-     labs(title=paste(table,'numeric distributions'),subtitle='Uniform reservoir samples; panels may have different units. Small histogram cells omitted.',
-          x='Value',y='Sampled observations (not patient counts)')
-    ggsave(file.path(output_dir,'plots',paste0(table,'_numeric.png')),pp,width=14,height=max(4,3*ceiling(uniqueN(hh$panel)/3)),dpi=150,limitsize=FALSE)
-   }
-   message('Completed ',table,': ',format(row_n,big.mark=','),' rows.')
-   rm(ds,reader,ids,categories,numbers,linked);invisible(gc(verbose=FALSE))
-  },error=function(e) {
-   message('FAILED ',table,': ',conditionMessage(e))
-   errors[[table]]<<-data.table(table=table,error=conditionMessage(e))
-   totals[[table]]<<-data.table(table=table,rows=NA_real_,columns=NA_integer_,unique_patients_direct=NA_real_,unique_hospitalizations=NA_real_,unique_patients_linked_from_hospitalization=NA_real_,status='failed')
-  })
-  put_outputs()
+ if(nrow(alltime)&&any(is.finite(alltime$hospitalizations))){
+  monthly_plot<-rbindlist(list(data.table(site='All sites',alltime),bytime),fill=TRUE)
+  monthly_plot[,date:=as.Date(paste0(month,'-01'))]
+  pp<-ggplot(monthly_plot,aes(date,hospitalizations))+geom_col(fill='#2878A8',na.rm=TRUE)+facet_wrap(~site,scales='free_y',ncol=2)+
+   labs(title='Admissions across the observed time span',subtitle='Unique hospitalization IDs per month; small counts omitted.',x='Admission month (UTC)',y='Hospitalizations')
+  ggsave(file.path(output_dir,'plots','admissions_over_time.png'),pp,width=12,height=max(5,2.7*ceiling(uniqueN(monthly_plot$site)/2)),dpi=160)
  }
- # Exact encounter-level derived LOS (numeric distribution needs no large full-table read).
- # Available directly from hospitalization timestamps; handled in a separate streamed pass.
- hp<-paths[basename(paths)=='clif_hospitalization.parquet']
- if(length(hp)) tryCatch({
-  ds<-open_dataset(hp)
-  if(all(c('admission_dttm','discharge_dttm') %in% ds$schema$names)) {
-   rr<-Scanner$create(ds |> select(admission_dttm,discharge_dttm),use_threads=FALSE,batch_size=batch_rows)$ToRecordBatchReader()
-   state<-eda_num_state();negative<-0
-   repeat {b<-rr$read_next_batch();if(is.null(b))break;x<-as.data.frame(b)
-    los<-(eda_timestamp(x$discharge_dttm)-eda_timestamp(x$admission_dttm))/86400
-    negative<-negative+sum(is.finite(los)&los<0);eda_add_numeric(state,los[is.finite(los)&los>=0],reservoir_n)
-   }
-   rr$Close();q<-if(length(state$sample))quantile(state$sample,c(.25,.5,.75,.95))else rep(NA_real_,4)
-   eda_write(data.table(valid_nonnegative_encounter_rows=state$n,negative_los_rows=negative,
-    mean_days=if(state$n)state$mean else NA_real_,q25_days=q[1],median_days=q[2],q75_days=q[3],q95_days=q[4],
-    sample_n=length(state$sample),unit='days; encounter rows, not merged hospital blocks'),file.path(output_dir,'hospital_length_of_stay.csv'))
-  }
- },error=function(e){errors[['length_of_stay']]<<-data.table(table='length_of_stay',error=conditionMessage(e));put_outputs()})
- inventory<-eda_bind(totals);dates<-eda_bind(date_all);monthly_counts<-eda_bind(calendar_all)
- eda_write(data.table(quantity=c('unique_patients_in_patient_table','patient_rows','unique_patients_in_hospitalization_table','unique_hospitalizations','hospitalization_rows'),
-  value=c(inventory[table=='clif_patient',unique_patients_direct][1],inventory[table=='clif_patient',rows][1],
-          inventory[table=='clif_hospitalization',unique_patients_direct][1],inventory[table=='clif_hospitalization',unique_hospitalizations][1],
-          inventory[table=='clif_hospitalization',rows][1])),file.path(output_dir,'sample_size_summary.csv'))
- if(nrow(monthly_counts)) {
-  mm<-monthly_counts[table %in% c('clif_hospitalization','clif_patient') & variable %in% c('admission_dttm','discharge_dttm','death_dttm')]
-  if(nrow(mm)) {
-   mm[,date:=as.Date(paste0(month,'-01'))]
-   pp<-ggplot(mm,aes(date,N))+geom_col(fill='#2878A8')+facet_wrap(~variable,scales='free_y',ncol=1)+theme_minimal()+
-    labs(title='Observed records by calendar month',x='Month (UTC)',y='Timestamped rows',subtitle='Record dates do not establish complete coverage or death ascertainment.')
-   ggsave(file.path(output_dir,'plots','calendar_coverage.png'),pp,width=12,height=8,dpi=150)
-  }
+ inv<-eda_bind(inventory)
+ if(any(is.finite(inv$rows)&inv$rows>0)){
+  pp<-ggplot(inv[is.finite(rows)&rows>0],aes(reorder(table,rows),rows))+geom_col(fill='#4A8C61')+coord_flip()+scale_y_log10()+
+   labs(title='Source table sizes',subtitle='Repeated measurement rows are not independent patients.',x=NULL,y='Rows (log scale)')
+  ggsave(file.path(output_dir,'plots','table_sizes.png'),pp,width=10,height=max(5,.3*nrow(inv)),dpi=160)
  }
- # Attribute encounters to the earliest recorded ADT hospital, not to every
- # location visited; linked patient denominators use unambiguous roster links.
- ap<-paths[basename(paths)=='clif_adt.parquet']
- if(length(ap)) tryCatch({
-  ds<-open_dataset(ap)
-  if(all(c('hospitalization_id','hospital_id','in_dttm') %in% ds$schema$names)) {
-   rr<-Scanner$create(ds |> select(hospitalization_id,hospital_id,in_dttm),use_threads=FALSE,batch_size=batch_rows)$ToRecordBatchReader()
-   first<-new.env(hash=TRUE,parent=emptyenv());first_n<-0L
-   repeat {
-    b<-rr$read_next_batch();if(is.null(b))break
-    x<-as.data.table(as.data.frame(b));x[,seconds:=eda_timestamp(in_dttm)]
-    x<-x[!eda_blank(hospitalization_id)&!eda_blank(hospital_id)&is.finite(seconds)]
-    x[,hospitalization_id:=as.character(hospitalization_id)];setorder(x,hospitalization_id,seconds)
-    x<-x[!duplicated(hospitalization_id)]
-    for(i in seq_len(nrow(x))) {
-     h<-x$hospitalization_id[i];z<-list(time=x$seconds[i],site=as.character(x$hospital_id[i]))
-     if(!exists(h,first,inherits=FALSE)) {if(first_n>=max_ids)stop('ADT exact-ID limit exceeded');assign(h,z,first);first_n<-first_n+1L}
-     else if(z$time<get(h,first)$time) assign(h,z,first)
-    }
-   }
-   rr$Close()
-   h<-ls(first,all.names=TRUE)
-   if(length(h)) {
-    ss<-data.table(site=vapply(h,function(id)get(id,first)$site,character(1)),
-      patient=vapply(h,function(id)if(roster_complete&&exists(id,roster,inherits=FALSE)&&!exists(id,roster_conflicts$values,inherits=FALSE))get(id,roster)else NA_character_,character(1)))
-    sites<-ss[,.(hospitalizations=.N,linked_unique_patients=if(roster_complete)uniqueN(patient[!is.na(patient)])else NA_integer_,
-                  hospitalizations_without_unambiguous_patient_link=sum(is.na(patient))),by=site]
-    eda_write(sites,file.path(output_dir,'hospital_sizes_first_adt.csv'))
-   }
-  }
- },error=function(e){errors[['hospital_sizes']]<<-data.table(table='hospital_sizes',error=conditionMessage(e));put_outputs()})
- writeLines(c('# Whole-extract CLIF EDA',
-  'Start with sample_size_summary.csv, table_inventory.csv, timestamp_ranges.csv and variable_dictionary.csv.',
-  'These summaries describe the delivered extract BEFORE any analytic cohort filters.',
-  'category_frequencies.csv counts source rows, not independent patients. hospital_sizes_first_adt.csv attributes each encounter to its earliest recorded ADT hospital.',
-  'column_missingness.csv reports NA/blank cells; missing death timestamps do not by themselves mean unknown vital status.',
-  'numeric_distributions.csv separates measurement categories and units, with exact finite-value moments and sampled quantiles.',
-  'Quantile/histogram samples are uniform reservoirs drawn across the entire scan; they are not first-row samples.',
-  paste('Tables successfully profiled:',sum(inventory$status=='complete')),paste('Reported errors:',length(errors)),
-  'All outputs should remain on Discovery until disclosure review. No raw identifiers or free-text contents are exported.'),file.path(output_dir,'START_HERE.md'))
- writeLines(c(paste('source:',normalizePath(data_dir)),paste('created_utc:',format(Sys.time(),tz='UTC')),
-  paste('batch_rows:',batch_rows),paste('numeric_reservoir_per_group:',reservoir_n),paste('seed:',seed),
-  'Row counts, ID cardinalities, missingness, timestamp ranges and retained category counts are exact for completed scans.',
-  'Numeric means/SD/min/max use all finite values; quantiles/histograms use bounded uniform reservoir samples.',
-  'Outputs describe the delivered filtered extract, NOT the complete Hopkins EHR or an analytic cohort.',
-  'Admission/discharge/measurement/death date ranges do not establish complete longitudinal follow-up.',
-  'Identifier values, free text and row-level samples are never exported. All outputs remain sensitive pending review.',
-  'Exact distinct-ID tracking uses memory proportional to distinct IDs; scan batches and numeric reservoirs are bounded.',
-  paste('tables_with_errors:',length(errors))),file.path(output_dir,'run_notes.txt'))
- if(length(errors)) {writeLines('Some tables failed. Inspect table_errors.csv before interpreting coverage.',file.path(output_dir,'PARTIAL.txt'))
-  return(invisible(FALSE))}
- writeLines('All discovered CLIF tables profiled.',file.path(output_dir,'COMPLETE.txt'))
- invisible(TRUE)
+ cv<-eda_bind(coverage)
+ if(nrow(cv)&&any(is.finite(cv$hospitalization_coverage_percent))){
+  pp<-ggplot(cv[is.finite(hospitalization_coverage_percent)],aes(reorder(table,hospitalization_coverage_percent),hospitalization_coverage_percent))+
+   geom_col(fill='#756BB1')+coord_flip()+labs(title='Availability of table records',x=NULL,y='% of source hospitalizations with at least one record')
+  ggsave(file.path(output_dir,'plots','table_availability.png'),pp,width=10,height=max(5,.3*nrow(cv)),dpi=160)
+ }
+ eda_write(if(length(errors))eda_bind(errors)else data.table(table=character(),error=character()),file.path(output_dir,'table_errors.csv'))
+ writeLines(c('# Basic rclif_2_1 overview',
+  'Start with sample_size_summary.csv, sample_size_by_site.csv, admissions_by_month.csv and time_span.csv.',
+  'The four overview plots show site size, admissions over time, table row counts and record availability.',
+  'variable_dictionary.csv lists every column/type. measurement_types_available.csv lists lab/vital/assessment labels only, without individual values or distributions.',
+  'No numeric vital/lab distributions, medication-dose plots, exact timestamps, free text or identifier values are exported.',
+  paste('Source:',normalizePath(data_dir)),paste('Site attribution:',attribution),paste('Small-cell threshold:',min_cell),
+  'Patients can have multiple hospitalizations and can contribute to more than one site/month. Do not add site/month patient counts to infer unique overall patients.',
+  'Table coverage means at least one row exists for an admission; it does not establish complete measurements or follow-up.',
+  'Observed date ranges are exported by month; they do not establish continuous coverage or a data refresh date.',
+  'These are working summaries of the delivered filtered extract, not the whole Hopkins EHR. Outputs require normal project disclosure review.'),file.path(output_dir,'START_HERE.md'))
+ writeLines(c(paste('created_utc:',format(Sys.time(),tz='UTC')),paste('batch_rows:',batch_rows),
+  paste('max_unique_ids:',max_ids),paste('tables_with_errors:',length(errors))),file.path(output_dir,'run_notes.txt'))
+ marker<-if(length(errors))'PARTIAL.txt'else'COMPLETE.txt'
+ writeLines(if(length(errors))'Inspect table_errors.csv: some summaries are incomplete.'else'Basic overview completed.',file.path(output_dir,marker))
+ invisible(!length(errors))
 }
-
-if(sys.nframe()==0L) {
- a<-commandArgs(trailingOnly=TRUE)
- if(!length(a))stop('Usage: Rscript Dataset_EDA/eda_rclif_dataset.R DATA_DIR [NEW_OUTPUT_DIR]')
+if(sys.nframe()==0L){
+ a<-commandArgs(trailingOnly=TRUE);if(!length(a))stop('Usage: Rscript Dataset_EDA/eda_rclif_dataset.R DATA_DIR [NEW_OUTPUT_DIR]')
  self<-sub('^--file=','',grep('^--file=',commandArgs(),value=TRUE)[1]);folder<-dirname(normalizePath(self))
- out<-if(length(a)>=2L)a[2]else file.path(folder,'results',paste0('run_',format(Sys.time(),'%Y%m%d_%H%M%S')))
- env_int<-function(n,default)as.integer(Sys.getenv(n,as.character(default)))
- ok<-eda_profile(a[1],out,batch_rows=env_int('EDA_BATCH_ROWS',65536),reservoir_n=env_int('EDA_RESERVOIR_N',2000),
-  max_categories=env_int('EDA_MAX_CATEGORIES',1000),max_groups=env_int('EDA_MAX_NUMERIC_GROUPS',2000),
-  max_ids=env_int('EDA_MAX_UNIQUE_IDS',2000000),min_cell=env_int('SUMMARY_SMALL_CELL_THRESHOLD',10))
- cat('Dataset EDA written to ',out,'\n',sep='')
- if(!ok)quit(status=1L)
+ out<-if(length(a)>=2L)a[2]else file.path(folder,'results',paste0('basic_run_',format(Sys.time(),'%Y%m%d_%H%M%S')))
+ ok<-eda_profile(a[1],out,batch_rows=as.integer(Sys.getenv('EDA_BATCH_ROWS','65536')),
+  max_ids=as.integer(Sys.getenv('EDA_MAX_UNIQUE_IDS','2000000')),min_cell=as.integer(Sys.getenv('SUMMARY_SMALL_CELL_THRESHOLD','10')))
+ cat('Basic EDA written to ',out,'\n',sep='');if(!ok)quit(status=1L)
 }
