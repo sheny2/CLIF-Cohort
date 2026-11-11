@@ -13,9 +13,11 @@
 # script contains the preparation code itself and never sources or executes 07.
 # Retains six-hour endpoints, 1st/99th percentile weight clipping, site-specific
 # weight models, and the existing CCW/landmark risk-set definitions.
-# Cox adjustment uses fixed time-zero covariates with hospital-stratified
-# baseline hazards and original-patient-clustered robust standard errors.
-# Longitudinal covariates enter weights, not evolving outcome-model adjustment.
+# Cox adjustment uses baseline features PLUS current six-hour interval clinical
+# covariates and missingness indicators. Hospital baseline hazards are stratified;
+# robust standard errors cluster on original patients across intervals/clones.
+# Current/lagged histories still enter weights; only current values enter Cox.
+# These adjusted associations are not automatically total causal effects.
 # Original landmark weights can use post-treatment end-of-grace covariates;
 # this outcome-model comparison deliberately preserves that limitation.
 
@@ -31,7 +33,7 @@ data_dir <- arg(1, Sys.getenv("CLIF_DATA_DIR", "/projects/emulate_icu/rclif_2_1"
 cohort_dir <- arg(2, Sys.getenv("COHORT_OUTPUT_DIR", file.path(root,"pipeline_output/sensitive/cohort")))
 treatment_dir <- arg(3, Sys.getenv("STEROID_TREATMENT_DIR", file.path(root,"pipeline_output/sensitive/steroid_treatment")))
 out <- arg(4, Sys.getenv("COX_OUTPUT_DIR", file.path(root,"pipeline_output",
-  paste0("cox_analysis_",format(Sys.time(),"%Y%m%d_%H%M%S")))))
+  paste0("cox_current_tv_",format(Sys.time(),"%Y%m%d_%H%M%S")))))
 cutoff_text <- arg(5, Sys.getenv("CLIF_DATA_CUTOFF_DATE", "2026-10-31"))
 grace_hours <- suppressWarnings(as.numeric(Sys.getenv("TREATMENT_GRACE_HOURS", "24")))
 max_patients <- suppressWarnings(as.integer(Sys.getenv("COX_MAX_PATIENTS", "0")))
@@ -1035,21 +1037,23 @@ capture <- function(expr,method,stage) withCallingHandlers(expr,warning=function
   invokeRestart("muffleWarning")
 })
 
-# Fix all extra outcome-model covariates at m=1 (time zero). Do not carry
-# evolving post-initiation measurements into a conventional adjusted Cox model.
-base <- as.data.table(d[d$.time==1,,drop=FALSE])
-base[, .uid := as.character(.uid)]
+# Align each Cox row to its own decision interval, rather than the m=1 row.
+# The clinical values were selected at/before the START of that interval by
+# prepare_cox_inputs(), then processed using the existing imputation rules.
 tv <- design$time_varying_covariates
-setnames(base,tv,paste0("t0_",tv))
-candidate <- c(design$baseline_covariates,paste0("t0_",tv))
-base <- base[,c(".uid",candidate),with=FALSE]
+candidate <- c(design$baseline_covariates,tv)
+covariates <- as.data.table(d)[,c(".uid",".time",candidate),with=FALSE]
+covariates[, .uid := as.character(.uid)]
+setnames(covariates,".time","interval")
+if(anyDuplicated(covariates[,.(.uid,interval)])) stop("Duplicate patient-interval covariates")
 retained <- character(); audit <- list()
 for(v in candidate) {
-  duplicate <- retained[vapply(retained,function(u) identical(base[[u]],base[[v]]),logical(1))]
-  reason <- if(uniqueN(base[[v]])<=1L) "omitted: constant" else
+  duplicate <- retained[vapply(retained,function(u) identical(covariates[[u]],covariates[[v]]),logical(1))]
+  reason <- if(uniqueN(covariates[[v]])<=1L) "omitted: constant" else
     if(length(duplicate)) paste0("omitted: identical to ",duplicate[1]) else "included"
   if(reason=="included") retained <- c(retained,v)
-  audit[[v]] <- data.table(variable=v,status=reason,measurement_window="fixed at time zero")
+  audit[[v]] <- data.table(variable=v,status=reason,measurement_window=
+    if(v %in% tv) "current interval; aligned to interval start" else "fixed baseline feature")
 }
 write_agg(rbindlist(audit),"cox_covariate_specification.csv")
 common <- g6_common_init_numerator(d,M)
@@ -1068,7 +1072,8 @@ make_frame <- function(ds,x,uid) {
     D <- if(arm==1) x$D1 else x$D0
     keep <- !is.na(row) & R[cell]
     data.table(.uid=as.character(ds$.uid[keep]),site=as.character(ds$.site[keep]),
-      strategy=arm,start=(ds$.time[keep]-1)*step/24,stop=ds$.time[keep]*step/24,
+      interval=ds$.time[keep],strategy=arm,
+      start=(ds$.time[keep]-1)*step/24,stop=ds$.time[keep]*step/24,
       event=as.integer(D[cell][keep]),weight=W[cell][keep])
   }))
 }
@@ -1085,25 +1090,28 @@ for(site in names(site_data)) {
 }
 frames <- list(CCW=rbindlist(ccw_frames),Landmark=rbindlist(landmark_frames))
 rm(ccw_frames,landmark_frames)
-fits <- results <- counts <- list()
+fits <- results <- counts <- model_terms <- list()
 for(method in names(frames)) {
-  message("Fitting weighted adjusted Cox model: ",method)
-  z <- merge(frames[[method]],base,by=".uid",all.x=TRUE,sort=FALSE)
+  message("Fitting weighted Cox model with current time-varying covariates: ",method)
+  z <- merge(frames[[method]],covariates,by=c(".uid","interval"),all.x=TRUE,sort=FALSE)
+  if(nrow(z)!=nrow(frames[[method]]) || anyNA(z[,..candidate])) stop("Cox covariate alignment failed")
   if(any(!is.finite(z$weight)|z$weight<=0) || any(z$stop<=z$start)) stop("Invalid Cox rows")
   # .uid is the original patient/block key, shared by both clones.
   z[,subject:=.uid]
   active <- retained[vapply(retained,function(v) uniqueN(z[[v]])>1L,logical(1))]
   form <- reformulate(c("strategy",active,"strata(site)"),response="Surv(start, stop, event)")
+  model_terms[[method]] <- data.table(method=method,term=c("strategy",active,"strata(site)"))
   fit <- capture(coxph(form,data=z,weights=weight,cluster=subject,robust=TRUE,
     ties="breslow",x=TRUE,y=TRUE,model=TRUE),method,"cox_fit")
   if(!is.finite(coef(fit)["strategy"])) stop("Strategy coefficient not estimable for ",method)
   sm <- summary(fit)$coefficients
   beta <- coef(fit)["strategy"]; se <- sqrt(vcov(fit)["strategy","strategy"])
-  results[[method]] <- data.table(method=paste0(method," + weighted adjusted Cox"),
+  results[[method]] <- data.table(method=paste0(method," + weighted Cox, current TV adjusted"),
     patients=uniqueN(z$subject),grace_hours=tau*step,hazard_ratio=unname(exp(beta)),
     ci_lower=unname(exp(beta-1.96*se)),ci_upper=unname(exp(beta+1.96*se)),
     log_hr_robust_se=unname(se),p_value=unname(2*pnorm(-abs(beta/se))),
-    outcome_covariates=length(active),ties="breslow",time_scale="days since original time zero; six-hour interval endpoints")
+    outcome_covariates=length(active),adjustment="baseline + current time-varying covariates",
+    ties="breslow",time_scale="days since original time zero; six-hour interval endpoints")
   coef_table <- data.table(term=rownames(sm),as.data.table(sm))
   write_agg(coef_table,paste0(tolower(method),"_cox_coefficients.csv"))
   counts[[method]] <- z[,.(patients=uniqueN(subject),patient_intervals=.N,
@@ -1126,13 +1134,15 @@ for(method in names(frames)) {
 result <- rbindlist(results)
 write_agg(result,"weighted_cox_hazard_ratios.csv")
 write_agg(rbindlist(counts),"cox_risk_set_summary.csv")
+write_agg(rbindlist(model_terms),"cox_actual_model_terms.csv")
 write_agg(unique(warnings),"model_warnings.csv")
-saveRDS(list(fits=fits,design=design),file.path(sensitive,"weighted_cox_models.rds"))
+saveRDS(list(fits=fits,design=design,adjustment="baseline + current time-varying covariates"),
+        file.path(sensitive,"weighted_cox_models.rds"))
 p <- ggplot(result,aes(hazard_ratio,method))+
   geom_vline(xintercept=1,linetype=2,color="grey50")+
   geom_segment(aes(x=ci_lower,xend=ci_upper,yend=method))+geom_point(size=3)+scale_x_log10()+
-  labs(title="Weighted Cox strategy hazard ratios",x="Hazard ratio (95% robust CI)",y=NULL)+theme_minimal(base_size=12)
-ggsave(file.path(agg,"weighted_cox_hazard_ratios.png"),p,width=10,height=4.5,dpi=180)
+  labs(title="Weighted Cox strategy HRs: current time-varying adjustment",x="Hazard ratio (95% robust CI)",y=NULL)+theme_minimal(base_size=12)
+ggsave(file.path(agg,"weighted_cox_hazard_ratios.png"),p,width=12,height=4.5,dpi=180)
 writeLines(c(
   "Two methods: pooled weighted adjusted Cox following CCW, and pooled weighted adjusted landmark Cox.",
   "Prepared directly from raw CLIF tables and scripts 01/04 outputs; no execution or outputs of 07 are required.",
@@ -1141,9 +1151,10 @@ writeLines(c(
   "CCW strategy is the assigned clone arm, not observed time-varying treatment. Clone rows share original-subject clustering.",
   "Landmark begins follow-up after the grace period among survivors; treatment group is fixed by initiation through the landmark.",
   "Landmark controls may initiate later, matching 07; its contrast is not identical to CCW's never-initiate control strategy.",
-  "Both Cox models adjust for fixed time-zero demographics/comorbidities and first-interval clinical covariates; hospital baseline hazards are stratified.",
-  "Longitudinal current/lagged covariates remain in the weights, not as evolving covariates in the outcome model.",
-  "The baseline-adjusted HR is conditional on included baseline covariates and site. It is not a risk ratio or RMST contrast, or a purely marginal HR.",
+  "Both Cox models adjust for baseline features PLUS the CURRENT interval's clinical covariates and missingness indicators; hospital baseline hazards are stratified.",
+  "Cox covariates are joined by patient AND interval and aligned to interval start. Existing lookback, plausibility, imputation, and scaling rules are retained.",
+  "Current and lagged histories remain in the weights. Lagged measurements are not additionally included in the Cox outcome formula.",
+  "The reported HR is conditional on baseline features, current measured history, and site. Treatment-affected covariates can change interpretation and introduce bias; this is not automatically a total or direct causal effect.",
   "Original landmark weights use end-of-grace measurements that may follow treatment. That limitation is preserved and not corrected here.",
   "Robust SEs cluster on original subjects, including both clones; estimated weight-model and truncation uncertainty is not propagated.",
   "Schoenfeld diagnostics are exploratory usual cox.zph diagnostics, not bootstrap tests accounting for estimated weights/cloning.",
