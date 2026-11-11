@@ -86,8 +86,16 @@ data_cutoff_dttm <- as.POSIXct(
 if (is.na(data_cutoff_dttm)) stop("DATA_CUTOFF_DATE must be YYYY-MM-DD.")
 
 step_hours <- 6L
-grace_hours <- as.integer(Sys.getenv("TREATMENT_GRACE_HOURS", unset = "24"))
+grace_hours <- suppressWarnings(as.numeric(
+  Sys.getenv("TREATMENT_GRACE_HOURS", unset = "24")
+))
 horizon_days <- 28L
+if (length(grace_hours) != 1L || !is.finite(grace_hours) ||
+    grace_hours < step_hours || grace_hours >= horizon_days * 24 ||
+    grace_hours %% step_hours != 0) {
+  stop("TREATMENT_GRACE_HOURS must be a positive multiple of 6, below 672 hours.")
+}
+grace_hours <- as.integer(grace_hours)
 tau <- grace_hours %/% step_hours
 M <- horizon_days * 24L %/% step_hours
 sample_seed <- 20260814L
@@ -116,7 +124,7 @@ message("Pneumonia cohort: ", normalizePath(cohort_path))
 message("Hospital-block crosswalk: ", normalizePath(crosswalk_path))
 message("Sensitive output: ", normalizePath(sensitive_dir, mustWork = FALSE))
 message("Shareable output: ", normalizePath(shareable_dir, mustWork = FALSE))
-message("Design: 6-hour intervals; configured grace period; 28-day follow-up")
+message("Design: 6-hour intervals; ", grace_hours, "-hour grace period; 28-day follow-up")
 message("Maximum sampled patients: ", if (max_patients == 0L) "all" else max_patients)
 message("Administrative data cutoff: ", format(data_cutoff_dttm, "%Y-%m-%d"))
 
@@ -702,19 +710,35 @@ lab_categories <- lab_dataset |>
   pull(lab_category) |>
   as.character()
 
-match_categories <- function(pattern) {
-  lab_categories[grepl(pattern, lab_categories, ignore.case = TRUE)]
+normalize_lab_category <- function(x) {
+  gsub("[^a-z0-9]+", "_", tolower(trimws(as.character(x))))
 }
-lab_map <- list(
-  wbc = match_categories("^wbc$|white.*blood"),
-  glucose = match_categories("glucose"),
-  albumin = match_categories("albumin"),
-  ph = match_categories("^ph$|arterial.*ph"),
-  paco2 = match_categories("paco2|pco2|carbon.*dioxide.*arterial"),
-  platelet = match_categories("platelet"),
-  bilirubin = match_categories("bilirubin.*total|total.*bilirubin|^bilirubin$"),
-  creatinine = match_categories("creatinine")
+# Explicit blood/serum aliases: do not combine venous and arterial blood gases,
+# bilirubin fractions, or urine and serum measurements through broad regexes.
+lab_aliases <- list(
+  wbc = c("wbc", "white_blood_cell_count", "white_blood_cells"),
+  glucose = c("glucose_serum", "serum_glucose", "glucose", "blood_glucose"),
+  albumin = c("albumin", "albumin_serum", "serum_albumin"),
+  ph = c("ph_arterial", "arterial_ph", "ph_blood_arterial"),
+  paco2 = c("pco2_arterial", "arterial_pco2", "paco2",
+            "carbon_dioxide_arterial", "arterial_carbon_dioxide"),
+  platelet = c("platelet_count", "platelets", "platelet"),
+  bilirubin = c("bilirubin_total", "total_bilirubin", "bilirubin"),
+  creatinine = c("creatinine", "creatinine_serum", "serum_creatinine")
 )
+lab_map <- lapply(lab_aliases, function(aliases) {
+  lab_categories[normalize_lab_category(lab_categories) %in% aliases]
+})
+lab_mapping_audit <- rbindlist(lapply(names(lab_map), function(variable) {
+  matched <- lab_map[[variable]]
+  data.table(
+    variable = variable,
+    matched_lab_category = if (length(matched)) paste(matched, collapse = ";") else NA_character_,
+    mapping_available = length(matched) > 0L,
+    definition = if (variable %in% c("ph", "paco2")) "arterial only" else "blood/serum"
+  )
+}))
+write_shareable_csv(lab_mapping_audit, "laboratory_category_mapping.csv")
 selected_lab_categories <- unique(unlist(lab_map, use.names = FALSE))
 if (length(selected_lab_categories)) {
   labs <- lab_dataset |>

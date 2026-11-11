@@ -9,9 +9,9 @@
 #   Rscript 04_define_steroid_treatment.R \
 #     [CANDIDATE_DIR] [COHORT_OUTPUT_DIR] [OUTPUT_DIR] [GRACE_HOURS]
 #
-# GRACE_HOURS is optional. If omitted, qualifying administrations and first
-# qualifying times are produced, but no target-trial treatment assignment is
-# made. It can also be set with TREATMENT_GRACE_HOURS.
+# GRACE_HOURS defaults to 24 hours and can also be set with
+# TREATMENT_GRACE_HOURS. All qualifying administrations remain available for
+# the independent 24/96-hour EDA, regardless of this assignment window.
 
 rm(list = ls())
 suppressPackageStartupMessages({
@@ -23,7 +23,8 @@ args <- commandArgs(trailingOnly = TRUE)
 script_args <- commandArgs(trailingOnly = FALSE)
 script_file <- grep("^--file=", script_args, value = TRUE)
 script_dir <- if (length(script_file)) {
-  dirname(normalizePath(sub("^--file=", "", script_file[1L])))
+  dirname(normalizePath(gsub("~+~", " ", sub("^--file=", "", script_file[1L]),
+                             fixed = TRUE)))
 } else normalizePath(getwd())
 
 candidate_dir <- if (length(args) >= 1L && nzchar(args[1L])) args[1L] else
@@ -33,7 +34,7 @@ cohort_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
 output_dir <- if (length(args) >= 3L && nzchar(args[3L])) args[3L] else
   file.path(script_dir, "pipeline_output", "sensitive", "steroid_treatment")
 grace_text <- if (length(args) >= 4L && nzchar(args[4L])) args[4L] else
-  Sys.getenv("TREATMENT_GRACE_HOURS", unset = "")
+  Sys.getenv("TREATMENT_GRACE_HOURS", unset = "24")
 grace_hours <- if (nzchar(grace_text)) suppressWarnings(as.numeric(grace_text)) else
   NA_real_
 if (nzchar(grace_text) && (!is.finite(grace_hours) || grace_hours < 0)) {

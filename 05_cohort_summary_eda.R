@@ -1,9 +1,12 @@
 #!/usr/bin/env Rscript
 
-# Create disclosure-conscious aggregate summaries and figures for the Hopkins
+# Create aggregate summaries and figures for the Hopkins
 # CLIF pneumonia/steroid cohort. All patient-level inputs remain on Discovery
 # HPC. This script writes CSV summaries and PNG figures only; it never exports
 # patient, hospitalization, or hospital-block identifiers.
+# Figures show all counts, including counts below 10. CSV summaries retain
+# MIN_CELL_N suppression. Timing EDA compares both 24 and 96 hours independently
+# of the treatment-assignment window used for the main analysis.
 #
 # Usage:
 #   Rscript 05_cohort_summary_eda.R \
@@ -22,7 +25,8 @@ args <- commandArgs(trailingOnly = TRUE)
 script_args <- commandArgs(trailingOnly = FALSE)
 script_file <- grep("^--file=", script_args, value = TRUE)
 script_dir <- if (length(script_file)) {
-  dirname(normalizePath(sub("^--file=", "", script_file[1L])))
+  dirname(normalizePath(gsub("~+~", " ", sub("^--file=", "", script_file[1L]),
+                             fixed = TRUE)))
 } else normalizePath(getwd())
 
 data_dir <- if (length(args) >= 1L && nzchar(args[1L])) args[1L] else
@@ -137,6 +141,9 @@ if ("treatment_admin_dttm" %in% names(cohort)) {
   cohort[, treatment_admin_dttm := safe_time(treatment_admin_dttm)]
 }
 grace_values <- unique(na.omit(cohort$treatment_grace_hours))
+if (length(grace_values) > 1L) {
+  stop("Treatment assignment contains multiple grace periods; rerun script 04.")
+}
 grace_hours <- if (length(grace_values)) as.numeric(grace_values[1L]) else NA_real_
 
 # Add patient demographics and death timestamp, but only for cohort patients.
@@ -337,6 +344,7 @@ site_summary <- cohort[, .(
   los_median_days = if ("length_of_stay_days" %in% names(cohort))
     median(length_of_stay_days, na.rm = TRUE) else NA_real_
 ), by = source_site_id]
+site_plot <- site_summary[, .(source_site_id, n_reportable = n)]
 site_summary[, `:=`(
   n_reportable = report_count(n),
   n_grace_complete_reportable = report_count(n_grace_complete),
@@ -382,6 +390,9 @@ outcome_summary <- cohort[, .(
   in_hospital_death = sum(in_hospital_death),
   hospice = sum(hospice_discharge)
 ), by = treatment_group]
+mortality_plot <- outcome_summary[n_28d_complete > 0L, .(
+  treatment_group, death_28d_percent = 100 * death_28d / n_28d_complete
+)]
 for (event in c("death_grace", "death_28d", "in_hospital_death", "hospice")) {
   outcome_summary[, paste0(event, "_reportable") := report_count(get(event))]
   denominator_column <- if (event == "death_grace") {
@@ -558,13 +569,7 @@ write_summary(quality_flags, "data_quality_checks.csv")
 theme_set(theme_minimal(base_size = 13))
 if (file.exists(attrition_path)) {
   attrition <- fread(attrition_path)
-  # Combine the pre-time-zero death check with the following code-status step
-  # in portable outputs so a small excluded cell cannot be reconstructed by
-  # subtracting adjacent attrition counts. The exact row remains sensitive.
-  attrition_plot <- attrition[
-    !is.na(n_hospital_blocks) &
-      !grepl("death before time zero", step, ignore.case = TRUE)
-  ]
+  attrition_plot <- attrition[!is.na(n_hospital_blocks)]
   attrition_plot[, step := factor(step, levels = rev(step))]
   p <- ggplot(attrition_plot, aes(n_hospital_blocks, step)) +
     geom_col(fill = "#2C7FB8") +
@@ -576,7 +581,6 @@ if (file.exists(attrition_path)) {
          width = 11, height = 6.8, dpi = 300)
 }
 
-site_plot <- copy(site_summary)[!is.na(n_reportable)]
 if (nrow(site_plot)) {
   p <- ggplot(site_plot, aes(source_site_id, n_reportable)) +
     geom_col(fill = "#41AB5D") +
@@ -593,8 +597,7 @@ if ("length_of_stay_days" %in% names(cohort)) {
                 .(bin = cut(pmin(length_of_stay_days, 60),
                             breaks = seq(0, 60, by = 5), include.lowest = TRUE))][,
                   .N, by = bin]
-  los[, n_reportable := report_count(N)]
-  los <- los[!is.na(n_reportable)]
+  los[, n_reportable := N]
   if (nrow(los)) {
     p <- ggplot(los, aes(bin, n_reportable)) +
       geom_col(fill = "#756BB1") +
@@ -627,14 +630,16 @@ timing_results <- build_followup_timing(
 )
 write_summary(timing_results$intervals, "death_and_treatment_six_hour_counts.csv")
 write_summary(timing_results$grace_comparison, "death_and_treatment_grace_comparison.csv")
-timing_plot <- timing_results$intervals
+# Plot exact counts even when the corresponding CSV uses small-cell suppression.
+timing_plot_results <- build_followup_timing(
+  cohort, qualifying_timing, data_cutoff_dttm, min_cell_n = 1L
+)
+timing_plot <- timing_plot_results$intervals
 cutoff_lines <- data.table(hours = c(24, 96), label = c("24 hours", "96 hours"))
 make_timing_plot <- function(x) {
   ggplot(x, aes(x = (interval_start_hours + interval_end_hours) / 2,
                 y = n_reportable)) +
     geom_col(width = 6, fill = "#2C7FB8", na.rm = TRUE) +
-    geom_point(data = x[count_suppressed == TRUE], aes(y = 0),
-               shape = 4, size = 1.5, color = "grey45") +
     geom_vline(data = cutoff_lines, aes(xintercept = hours, color = label),
                linetype = "dashed", linewidth = 0.65) +
     scale_color_manual(values = c("24 hours" = "#D95F02", "96 hours" = "#7570B3"),
@@ -643,8 +648,7 @@ make_timing_plot <- function(x) {
                        limits = c(0, 672), expand = expansion(mult = c(0, 0))) +
     facet_wrap(~event_type, ncol = 1, scales = "free_y") +
     labs(title = "Deaths and first qualifying steroid administration through day 28",
-         subtitle = paste0("Six-hour bins; each patient counted once per panel. ",
-                           "Crosses mark suppressed bins (threshold ", min_cell_n, ")."),
+         subtitle = "Six-hour bins; each patient counted once per panel",
          x = "Hours since respiratory-failure time zero (672 hours = 28 days)",
          y = "Patients per six-hour interval",
          caption = paste("Observed counts through the data cutoff; not adjusted rates.",
@@ -661,7 +665,21 @@ ggsave(file.path(output_dir, "plot_death_timing.png"),
        make_timing_plot(timing_plot[event_type == "Death"]),
        width = 12, height = 5.5, dpi = 300)
 
-mortality_plot <- copy(outcome_summary)[!is.na(death_28d_percent)]
+grace_plot <- copy(timing_plot_results$grace_comparison)
+grace_plot[, grace_window := factor(paste0(grace_hours, " hours"),
+                                    levels = c("24 hours", "96 hours"))]
+p <- ggplot(grace_plot, aes(grace_window, n_reportable, fill = grace_window)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = n_reportable), vjust = -0.3) +
+  facet_wrap(~event_type, scales = "free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Observed deaths and steroid administration by grace-period end",
+       subtitle = "Cumulative counts at 24 and 96 hours in the same cohort",
+       x = "Grace period", y = "Patients",
+       caption = "Observed through the configured data cutoff; not adjusted rates or treatment effects.")
+ggsave(file.path(output_dir, "plot_grace_period_comparison.png"), p,
+       width = 11, height = 5.5, dpi = 300)
+
 if (nrow(mortality_plot)) {
   p <- ggplot(mortality_plot,
               aes(treatment_group, death_28d_percent, fill = treatment_group)) +
