@@ -6,15 +6,9 @@ It adapts the MIMIC-IV cohort logic to the Hopkins multisite CLIF.
 The current Discovery HPC source at `/projects/emulate_icu/rclif_2_1` is a
 limited CLIF 2.1 extract prepared with these upstream filters:
 
-1. `admission_dttm` in the configured January 2021--December 2026 interval
-   (the extract itself was created in early September 2026).
+1. `admission_dttm` in the configured January 2021--December 2026 interval.
 2. Admission from the emergency department.
 3. Ever received IMV, NIPPV, or HFNO.
-
-The cohort script intentionally reapplies its ED and respiratory-support rules
-because the analytic criteria are narrower than these shipping filters. The
-source delivery also contains `shipped_flow_chart.csv` for reconciliation with
-the shipped table denominators.
 
 
 ## Current cohort definition
@@ -26,7 +20,7 @@ per patient using the CAPE COD-aligned rules confirmed for this emulation:
 2. Require valid admission/discharge timestamps, a patient identifier, and age at least 18 (but less than 120 years).
 3. Require the first component encounter to have `admission_type_category == "ed"`.
 4. Require an ICD-10-CM code from `J12.*`, `J13-J17.*`, or `J18.*` in any diagnosis position with `poa_present == 1`. Influenza (`J09-J11`), aspiration (`J69.*`), and ventilator-associated pneumonia (`J95.851`) are exclusionary when present on admission. `U07.1` and organism/sepsis codes do not qualify without a qualifying pneumonia diagnosis; `J12.82` qualifies through `J12.*`.
-   The J17.* inclusion follows Chad's review of [Smithee et al. (PMID: 32782916)](https://pubmed.ncbi.nlm.nih.gov/32782916/); the existing code families are retained, with influenza pneumonia excluded.
+   The J17.* inclusion follows review of [Smithee et al. (PMID: 32782916)](https://pubmed.ncbi.nlm.nih.gov/32782916/); the existing code families are mostly retained, with influenza pneumonia excluded.
 5. Define time zero as the first eligible initiation of IMV or NIPPV, or HFNO initiation with a contemporaneous S/F ratio below 315 while FiO2 is greater than 0.50. SpO2 and HFNO FiO2 records are paired within four hours. No future respiratory-support duration is required.
 6. Exclude DNR/DNI-equivalent code status (`and`, `dnr`, `dni`, `dnar`, `dnr/dni`, or `dnar/dni` after normalization) documented during the seven days before and through time zero.
 7. Exclude the concurrent-shock proxy at time zero: any active norepinephrine/epinephrine on NIPPV or HFNO; norepinephrine/epinephrine greater than 0.25 mcg/kg/min on IMV; any active vasopressin; or lactate at least 4 mmol/L. The most recent medication and lactate records in the preceding six hours are used. Missing or nonconvertible shock data are retained and flagged rather than treated as evidence of shock.
@@ -214,15 +208,14 @@ The script normalizes mg, mcg/ug, and g to mg, applies the five drug-specific
 thresholds, records a reason for every nonqualifying administration, and writes
 a one-row-per-block treatment assignment when a grace period is supplied.
 
-## Data governance
+## Data privacy
 
 This is a limited data set governed by the approved Discovery HPC environment.
 Do not move patient-level parquet files or other row-level data off the HPC.
 Only appropriately reviewed aggregate results may be moved to the SAFE desktop;
 only publication-level summary results may be placed on OneDrive. Generated
 patient-level directories are git-ignored. Suppressed diagnostic CSVs default
-to suppressing counts below 10; this does not replace project-specific IRB or
-disclosure review.
+to suppressing counts below 10.
 
 ## 6. Generate aggregate cohort summaries and EDA
 
@@ -342,20 +335,6 @@ indicators. Availability checks remove variables that are absent or constant.
 - `pneumonia_icd_definition.csv`
 
 
-
-## Packages (if needed)
-
-```r
-install.packages(c("arrow", "data.table", "dplyr", "ggplot2"))
-```
-
-## Native-memory errors
-
-If R exits with a libc message such as `corrupted size vs. prev_size`, record
-the last progress message and run `sessionInfo()` in a fresh R session. This is
-a native Arrow/data.table failure rather than a catchable R condition. The
-current cohort builder avoids collecting the full ADT table and selects only
-needed hospitalization/diagnosis columns to reduce that risk.
 
 ## Six-hour death and treatment timing
 
