@@ -68,3 +68,14 @@ Rscript 08_local_ccw_meta_analysis.R "$RUN_ROOT" \
  2>&1 | tee "$RUN_ROOT/logs/08.log"
 # New six-method forest/results: $RUN_ROOT/aggregate/local_ccw_meta/
 # Original five-method outputs in aggregate/analysis/ remain unchanged.
+
+# Optional 09: one historical NCO, diagnostic only. Set the EXPANDED table path
+# explicitly; the original filtered hospitalization table is not sufficient.
+if [[ -n "${EXPANDED_HOSPITALIZATION_PATH:-}" ]]; then
+ NCO_ARGS=("$RUN_ROOT" "$EXPANDED_HOSPITALIZATION_PATH")
+ if [[ -n "${HISTORY_COVERAGE_START_DATE:-}" ]]; then
+  NCO_ARGS+=("$HISTORY_COVERAGE_START_DATE")
+ fi
+ Rscript 09_prior_hospitalization_nco_diagnostic.R "${NCO_ARGS[@]}" \
+  2>&1 | tee "$RUN_ROOT/logs/09.log"
+fi

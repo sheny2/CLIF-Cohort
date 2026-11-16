@@ -22,3 +22,10 @@ PASS: local CCW/meta-analysis and six-method/site forests with categorical SF.
 Cohort eligibility timing in 01 remains the previous symmetric clinical window;
 the strict no-future pairing applies to analysis covariates. All other covariate
 adjacent-fill policies are unchanged. Real-data coverage is not yet known.
+
+09 single historical NCO diagnostic:
+PASS: inclusive 365-day admission boundary, exclusion of future/index-connected
+episodes, invalid-date uncertainty, verified-coverage exclusions and paired-clone covariance.
+PASS: synthetic integrations using saved 24h and 96h CCW/landmark weights;
+primary 07 result files unchanged. No nuisance refitting or calibration.
+No historical data from the actual expanded EHR table have been analyzed locally.

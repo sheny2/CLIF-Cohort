@@ -75,3 +75,33 @@ Do not substitute the expanded history hospitalization table for the original in
 Key files include screening_ranges.csv, raw_measurement_screening_counts.csv, adjacent_fill_audit_*.csv, model_relevant_missingness.csv, ipcw_model_specification.csv, five_method_results.csv, and six_method_results.csv. EDA/figures are unsuppressed; patient-level files remain in sensitive directories.
 
 Synthetic checks: `Rscript tests/test_pipeline.R` and `Rscript tests/test_local_meta.R /path/to/synthetic/run`. They do not run on the actual EHR data.
+
+## 09 — Primary historical NCO diagnostic
+
+After 07 completes, run:
+
+```bash
+Rscript 09_prior_hospitalization_nco_diagnostic.R \
+  "/path/to/completed/run" \
+  "/path/to/expanded_clif_hospitalization.parquet"
+```
+
+An optional third argument gives a verified **system-level** history coverage start (`YYYY-MM-DD`). With that argument, diagnostic contrasts exclude patients whose entire 365-day lookback is not covered. Without it, zeros mean no observed prior within-system admission; complete history coverage is explicitly unverified. Do not use each patient's first encounter as the coverage-start date or require a previous admission to establish eligibility. Do not pass the original filtered index-only table as though it were expanded history.
+
+The single NCO is **any distinct within-system hospital episode starting in the 365 days before index hospital-block admission**. The end of the window is index admission, not respiratory-failure time zero, so the current admission's pre-time-zero days cannot count as prior utilization. Encounters are deduplicated and overlap/<=6-hour transfer chains merged. Expanded episodes containing any selected index encounter are excluded, including connected prior transfer components. Only completed prior episodes count; potentially historical records with invalid dates make an otherwise negative NCO unknown. These records are reported rather than silently coded zero. Future admissions do not count. This definition counts hospitalizations represented by the delivered table; verify that it represents the intended admissions rather than an unfiltered mixture including outpatient/ED-only visits.
+
+**This is not a replacement 28-day survival outcome.** The hospitalization already occurred before follow-up. 09 reuses the exact saved 07 clone risk sets, raw/clipped IPCW and confounder setup, then compares the historical binary NCO's weighted prevalence across the strategy-specific risk sets during grace. It also reports unweighted full-cohort observed-group comparisons and a saved-weight landmark comparison. The NCO is not included in the weight model. No weights or primary outcome estimates are refitted or calibrated.
+
+CCW comparisons condition on evolving adherence/survival risk sets; the landmark comparison conditions on survival through grace. An imbalance can therefore reflect **selection as well as residual confounding**. These contrasts are diagnostics, not a formal causal NCO effect with a guaranteed zero null under every selection mechanism. Initial identical clones have equal baseline NCOs by construction, so initial equality is not validation. CIs combine both clones' contributions at the original-patient level, treating estimated weights as fixed. No bootstrap, multiple-NCO model or bias calibration is included.
+
+Outputs:
+
+- `aggregate/nco_prior_hospitalization/primary_nco_summary.csv`: pooled descriptive/last-grace-interval/landmark contrasts.
+- `primary_nco_weighted_contrasts.csv`: site and pooled contrasts over grace, both raw/clipped weights, arm prevalences, prevalence differences and ESS.
+- `primary_nco_ccw_diagnostic.png`: diagnostic differences over grace.
+- `nco_availability_by_site.csv`, `historical_source_audit.csv`, `METHOD_NOTES.txt`: history availability/coverage and interpretation.
+- `sensitive/nco_prior_hospitalization/`: the patient NCO and qualifying historical episode audit.
+
+The existing 07/08 results remain unchanged. You can run 09 alone on a completed run. For optional execution after the complete command file, set `EXPANDED_HOSPITALIZATION_PATH` and, if known, `HISTORY_COVERAGE_START_DATE` before launching that file.
+
+Software check: `Rscript tests/test_primary_nco.R` for boundary/coverage/clone-covariance tests. Add a synthetic completed run path for integration testing.
