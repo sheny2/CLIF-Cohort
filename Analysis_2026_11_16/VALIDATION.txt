@@ -1,0 +1,12 @@
+November 16 version: synthetic software validation only.
+PASS: Chad screening boundaries, including permitted zeros and updated upper limits.
+PASS: nearest same-block fallback, future-use audit, earlier tie-break, no
+cross-block borrowing and no new adjacent filling after discharge.
+PASS: full synthetic 01--05/07 analysis at 24h and 96h; EDA and outcome counts agree.
+PASS: five-method results, local CCW/meta-analysis and site/six-method forests
+at both grace periods; local weighted curves checked independently.
+PASS: R parsing, shell command syntax and whitespace checks.
+PASS: hash comparison confirms the previous 11_15 parent source files unchanged.
+Actual EHR estimates/sample sizes require rebuilding on the server.
+Nearest-reading fills can include future/post-treatment values; audit files
+must be reviewed before causal interpretation. NCO work is not included.
