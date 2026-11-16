@@ -10,6 +10,7 @@ sf <- sub("^--file=","",grep("^--file=",commandArgs(FALSE),value=TRUE)[1])
 root <- dirname(normalizePath(gsub("~+~"," ",sf,fixed=TRUE)))
 source(file.path(root,"06_generalized_five_methods.R"))
 source(file.path(root,"variable_rules.R"))
+source(file.path(root,"sf_pairing_helpers.R"))
 source(file.path(root,"outcome_helpers.R"))
 source(file.path(root,"analysis_eda_helpers.R"))
 source(file.path(root,"analysis_preparation.R"))
@@ -37,12 +38,12 @@ site_summary <- cohort[,.(patients=.N,events_28d=sum(delta)),by=site]
 cohort[, initiation_group := fcase(S<=tau,"Within grace period",S<=M,"Later initiation",default="No observed initiation through day 28")]
 write_agg(cohort[,.(patients=.N,events_28d=sum(delta)),by=.(site,initiation_group)],"initiation_groups_by_site.csv")
 write_agg(data.table(parameter=c("strategy_1","strategy_0","grace_hours","horizon_days","missing_data_rules","outcome"),
- value=c(design$strategy_1,design$strategy_0,as.character(grace_hours),as.character(horizon_days),"Chad bounds; adjacent same-block filling; categorical support; strict S/F; gases excluded; no winsorization",PRIMARY_OUTCOME)),"early_initiation_design.csv")
+ value=c(design$strategy_1,design$strategy_0,as.character(grace_hours),as.character(horizon_days),"Chad bounds; adjacent filling for other covariates; prior-only same-device categorical S/F; gases excluded; no winsorization",PRIMARY_OUTCOME)),"early_initiation_design.csv")
 writeLines(c("Initiation within grace versus no initiation within grace; later initiation is allowed in controls.",
  "Control clones are censored only for initiation within grace. Later initiation does not censor them.",
  "Treatment/adherence weights freeze at grace end; natural-censoring weights, if applicable, can continue.",
  "All other preparation, six-hour grid/event boundary conventions and 1st/99th percentile weight truncation follow the original methods.",
- "Covariate gaps use nearest valid same-block measurements, with future-use and distance audits. Other numeric gaps use decision-risk-set medians plus indicators.",
+ "Non-S/F measurement gaps use nearest valid same-block measurements, with future-use and distance audits. Other numeric gaps use decision-risk-set medians plus indicators.",
  "All five methods, including landmark, use in-hospital death or hospice discharge by day 28.",
  "Observed early-treatment labels do not replace CCW cloning: primary events during grace remain handled by the inherited clone risk sets.",
  "HFNO eligibility requires SpO2 <=97%; other cohort eligibility and steroid definitions follow the original pipeline."

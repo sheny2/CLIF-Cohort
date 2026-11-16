@@ -10,3 +10,15 @@ PASS: hash comparison confirms the previous 11_15 parent source files unchanged.
 Actual EHR estimates/sample sizes require rebuilding on the server.
 Nearest-reading fills can include future/post-treatment values; audit files
 must be reviewed before causal interpretation. NCO work is not included.
+
+Same-device S/F and categorical-covariate update:
+PASS: strict prior-only FiO2 <=4h at SpO2 time; device switches and return to
+previous device reset carry-forward; a later switch invalidates older SF.
+PASS: 4h boundaries, high SpO2, stale/no SpO2, absent respiratory data,
+no future FiO2, and mutually exclusive category boundaries.
+PASS: full 01--07 synthetic pipeline at 24h/96h, with no continuous SF model
+or SF median-imputation flag; current/lagged category indicators are used.
+PASS: local CCW/meta-analysis and six-method/site forests with categorical SF.
+Cohort eligibility timing in 01 remains the previous symmetric clinical window;
+the strict no-future pairing applies to analysis covariates. All other covariate
+adjacent-fill policies are unchanged. Real-data coverage is not yet known.

@@ -575,10 +575,7 @@ temperature <- rolling_last(
   vitals[vital_category %chin% c("temperature", "temperature_c", "temp_c")],
   "recorded_dttm", "vital_value", "temperature", 12
 )
-spo2 <- rolling_last(
-  vitals[vital_category == "spo2"],
-  "recorded_dttm", "vital_value", "spo2", 12
-)
+sf_spo2_source <- copy(vitals[vital_category=="spo2"])
 map_value <- rolling_last(
   vitals[vital_category %chin% c("map", "mean_arterial_pressure")],
   "recorded_dttm", "vital_value", "map_value", 12
@@ -690,7 +687,25 @@ respiratory[, device_category_clean := gsub(
 )]
 respiratory[, support_code := match(map_support(device_category_clean), SUPPORT_LEVELS)]
 audit_raw(respiratory,"fio2_set","fio2")
-fio2 <- rolling_last(respiratory, "recorded_dttm", "fio2_set", "fio2", 12)
+sf_links <- cohort[,.(hospital_block_id,admission_dttm,discharge_dttm,event_dttm)]
+clip_sf <- function(z) {
+ z<-merge(z,sf_links,by="hospital_block_id")
+ z[recorded_dttm>=admission_dttm & recorded_dttm<=discharge_dttm & recorded_dttm<=data_cutoff_dttm &
+   (is.na(event_dttm)|recorded_dttm<=event_dttm)]
+}
+sf_pairs <- build_sf_pairs(clip_sf(sf_spo2_source),clip_sf(respiratory))
+sf_inputs <- sf_pairs_to_grid(sf_pairs,grid)
+write_parquet(sf_pairs,file.path(sensitive_dir,"sf_measurement_pairs.parquet"))
+sf_pairs <- merge(sf_pairs,cohort[,.(hospital_block_id,site,index_dttm)],by="hospital_block_id")
+sf_pairs[,hours:=(spo2_seconds-as.numeric(index_dttm))/3600]
+write_shareable_csv(sf_pairs[hours>=0 & hours<=672,.(measurements=.N,time_device_paired=sum(sf_reason%in%c("Eligible","SpO2 >97%")),eligible=sum(is.finite(sf_ratio))),by=.(site,sf_reason)],"sf_measurement_pairing_coverage.csv")
+first_day<-sf_pairs[hours>=0 & hours<=24,.(patients_with_spo2=uniqueN(hospital_block_id),
+ patients_with_eligible_sf=uniqueN(hospital_block_id[is.finite(sf_ratio)])),by=site]
+first_day<-merge(cohort[,.(cohort_patients=.N),by=site],first_day,by="site",all.x=TRUE)
+for(v in c("patients_with_spo2","patients_with_eligible_sf"))setnafill(first_day,"const",0,cols=v)
+first_day[,eligible_percent:=100*patients_with_eligible_sf/cohort_patients]
+write_shareable_csv(first_day,"sf_any_first_day_coverage.csv")
+rm(sf_spo2_source)
 support <- rolling_last(respiratory, "recorded_dttm", "support_code", "support_code", 12)
 rm(respiratory); gc(verbose = FALSE)
 
@@ -717,8 +732,8 @@ rm(assessment); gc(verbose = FALSE)
 message("Constructing longitudinal covariates and SOFA proxy...")
 long <- copy(grid)
 for (object_name in c(
-  "temperature", "spo2", "map_value", "wbc", "glucose", "albumin",
-  "platelet", "bilirubin", "creatinine", "fio2", "support", "gcs"
+  "temperature", "sf_inputs", "map_value", "wbc", "glucose", "albumin",
+  "platelet", "bilirubin", "creatinine", "support", "gcs"
 )) {
   long <- merge(
     long,
@@ -733,7 +748,20 @@ setorder(long, site, hospital_block_id, m)
 long[fio2 > 1.5, fio2 := fio2 / 100]
 long[fio2 < 0.21 | fio2 > 1, fio2 := NA_real_]
 long[spo2 < 70 | spo2 > 100, spo2 := NA_real_]
-long[, sf_ratio := fifelse(is.finite(spo2) & spo2 <= 97, spo2 / fio2, NA_real_)]
+# sf_ratio is constructed at actual SpO2 times using strictly prior same-episode FiO2.
+for(j in seq_along(SF_DUMMIES)) {
+ level <- c("Undefined","250-300","200-250","120-200","<=120")[j]
+ long[,(SF_DUMMIES[j]):=as.integer(sf_category==level)]
+}
+sf_coverage<-rbindlist(list(
+ long[,.(scope="all_observed_rows",rows=.N,eligible=sum(is.finite(sf_ratio))),by=.(site,m,sf_reason)],
+ long[m<=tau & m<=S,.(scope="untreated_decisions_during_grace",rows=.N,eligible=sum(is.finite(sf_ratio))),by=.(site,m,sf_reason)]))
+write_shareable_csv(sf_coverage,"sf_decision_time_coverage.csv")
+write_shareable_csv(long[,.(patients=.N),by=.(site,m,sf_category)],"sf_category_counts_by_interval.csv")
+write_shareable_csv(data.table(category=SF_LEVELS,
+ definition=c("No eligible prior pair",">300","250 < SF <=300","200 < SF <=250","120 < SF <=200","SF <=120"),
+ model_role=c("Indicator","Reference",rep("Indicator",4))),"sf_category_definition.csv")
+write_shareable_csv(long[m==1,.(patients=.N,eligible=sum(is.finite(sf_ratio))),by=.(site,sf_category)],"sf_baseline_coverage.csv")
 long[, support_category := SUPPORT_LEVELS[as.integer(support_code)]]
 long[is.na(support_category),support_category:="Unknown"]
 for (category in SUPPORT_LEVELS[-1]) {
@@ -780,7 +808,7 @@ long[, nonresp_sofa_proxy := rowSums(.SD), .SDcols = sofa_parts]
 
 raw_tv <- c(
   "temperature", "wbc", "glucose", "albumin",
-  "sf_ratio", "nonresp_sofa_proxy"
+  "nonresp_sofa_proxy"
 )
 
 plausible_limits <- lapply(setNames(raw_tv,raw_tv),function(v) {
@@ -854,7 +882,7 @@ usable_tv <- covariate_qa[usable == TRUE, variable]
 time_varying_covariates <- c(
   covariate_qa[usable == TRUE, model_variable],
   paste0(usable_tv, "_missing"),
-  paste0("support_",SUPPORT_LEVELS[-1]), "support_unknown"
+  paste0("support_",SUPPORT_LEVELS[-1]), "support_unknown", SF_DUMMIES
 )
 time_varying_covariates <- time_varying_covariates[
   vapply(long[, ..time_varying_covariates], function(x) uniqueN(x) > 1L,
@@ -931,6 +959,7 @@ stopifnot(
 design <- list(
   source = "Hopkins multisite EHR data in CLIF 2.1 format",
   analysis_version = "Analysis_2026_11_16",
+  sf_definition = SF_DEFINITION,
   measurement_processing = "Chad bounds; nearest same-block fallback; no winsorization",
   analysis_unit = "one eligible six-hour hospital block per patient",
   time_zero = "respiratory-failure start",

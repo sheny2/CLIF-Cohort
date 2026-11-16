@@ -707,6 +707,7 @@ cat("Summary results: ", normalizePath(output_dir), "\n", sep = "")
 
 # Measurement processing, categorical support trajectories and missingness.
 source(file.path(script_dir,"variable_rules.R"))
+source(file.path(script_dir,"sf_pairing_helpers.R"))
 source(file.path(script_dir,"analysis_eda_helpers.R"))
 source(file.path(script_dir,"analysis_preparation.R"))
 eda_sensitive <- if(length(args)>=7L && nzchar(args[7])) args[7] else

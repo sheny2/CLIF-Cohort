@@ -105,7 +105,8 @@ stopifnot(fill[hospital_block_id==b2&m==1,future],fill[hospital_block_id==b2&m==
 b1<-c[patient_id=="p0001",hospital_block_id]
 stopifnot(long[hospital_block_id==b1&m==1,temperature]>=30)
 spec<-fread(file.path(result,"aggregate","analysis","ipcw_model_specification.csv"))
-stopifnot(!any(grepl("support_score|paco2|^ph_",spec$term)),any(grepl("support_hfno",spec$term)))
+stopifnot(!any(grepl("support_score|paco2|^ph_|sf_ratio_model|sf_ratio_missing",spec$term)),
+ any(grepl("^sf_",spec$term)),all(is.na(long$sf_ratio[long$spo2>97])))
 states<-fread(file.path(eda,"respiratory_support_proportions_full_cohort.csv"))
 stopifnot(all(abs(states[,sum(proportion),by=.(site,hours)]$V1-1)<1e-10))
 diag<-readRDS(file.path(result,"sensitive","analysis","weight_diagnostics_patient_level.rds"))
