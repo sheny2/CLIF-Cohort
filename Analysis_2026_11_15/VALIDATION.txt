@@ -37,3 +37,13 @@ PASS: script 07 writes only aggregate/analysis and sensitive/analysis below its
 run root, with no extra top-level analysis directory.
 PASS: R parsing, shell syntax, and whitespace checks.
 The actual EHR data still require a fresh server run under the new outcome.
+
+08 local-CCW/meta-analysis extension:
+PASS: synthetic 24h and 96h runs produce five independent local CCW fits,
+random-/fixed-effect summaries and a six-method table/forest without changing 07.
+PASS: site RD and restricted mean event-free time differences match independent
+reconstruction of weighted event-free curves from the local clone risk/event sets.
+PASS: fixed-effect pooling matches inverse-variance arithmetic; RR pooling uses
+log scale; weights sum to 100%; invalid/zero variances and insufficient sites are handled explicitly.
+PASS: six-method forest layout visually inspected on synthetic data.
+No estimates from the real EHR cohort have been calculated locally.

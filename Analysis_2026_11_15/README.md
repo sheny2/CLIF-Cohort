@@ -4,7 +4,7 @@ This folder contains a complete 01–07 pipeline. It does not source any script 
 
 ## Run
 
-Install R packages `arrow`, `data.table`, `dplyr`, `ggplot2`, and `survival`. Open `RUN_PIPELINE_COMMANDS.txt`, adjust the first server path and administrative cutoff if necessary, and execute its commands in bash/zsh. Script 06 is a library automatically sourced by 07. There is no Cox analysis in this version.
+Install R packages `arrow`, `data.table`, `dplyr`, `ggplot2`, and `survival`. Script 08 additionally requires `metafor` (`install.packages("metafor")`). Open `RUN_PIPELINE_COMMANDS.txt`, adjust the first server path and administrative cutoff if necessary, and execute its commands in bash/zsh. Script 06 is a library automatically sourced by 07. There is no Cox analysis in this version.
 
 The default grace period is **24 hours**, with six-hour intervals and 28-day follow-up for in-hospital death or hospice discharge. Set `TREATMENT_GRACE_HOURS` to another positive multiple of six below 672 to change it. Results record the actual setting; figure names describe the grace period without assuming a fixed length. Timing EDA compares both 24 and 96 hours.
 
@@ -140,3 +140,30 @@ results/run_<timestamp>_grace24h/
 ```
 
 Script 07's fourth argument is now the **run root**, not an `analysis/` subfolder. It creates `aggregate/analysis` and `sensitive/analysis` itself. The run command file supplies this correctly. Use a fresh run to avoid mixing the old all-cause endpoint/results with the new composite endpoint. No old result files are automatically moved or deleted.
+
+## 08 — Site-local CCW followed by meta-analysis
+
+After 07 completes, run `Rscript 08_local_ccw_meta_analysis.R "$RUN_ROOT"`. The fourth argument to 07 and the first argument to 08 refer to the same timestamped run root. The updated command file includes this final step. If 07 is already running, it need not be restarted: execute 08 separately once `aggregate/analysis/COMPLETE.txt` exists.
+
+Each site independently fits the CCW initiation and natural-censoring models, constructs clone-specific weights, and estimates weighted Kaplan–Meier/event-free outcome curves and contrasts. The endpoint, grace period, six-hour boundaries and clipping convention match 07. The script reads the screened raw covariates and within-patient temperature fills prepared by 07, but recalculates numeric imputation, winsorization and scaling using only that site's untreated grace-period decision rows. Site-constant candidate terms are omitted. Initiation numerator rates are empirical interval-specific rates from that site alone. The shared confounder definitions/initial candidate list are inherited from 07; actual local model terms and transformations are exported.
+
+The primary meta-analysis uses inverse-variance **random-effects REML** with **Hartung–Knapp 95% t intervals**. Fixed-effect inverse-variance results are also reported. RD and restricted mean event-free time differences are pooled directly; RR and OR are pooled on the log scale and exponentiated. Tau-squared, I-squared, Cochran Q/p-values, prediction intervals for the random-effects estimate, per-site weights and per-estimand exclusions are exported. These calculations use `metafor::rma.uni` (https://wviechtb.github.io/metafor/reference/rma.uni.html).
+
+The meta-analysis targets an average of site effects, rather than the participant-pooled effect estimated by the federated CCW estimator. Estimates can therefore differ even when the analysis code is correct. With only five sites, heterogeneity estimates and prediction intervals are uncertain. Confidence intervals inherit 07's fixed-nuisance influence-function variance approximation; this is not a bootstrap that refits weights.
+
+A site without either observed initiation group cannot supply a local contrast. Nonconverged nuisance fits or loss of every clone at risk while event-free probability remains nonzero exclude a site from pooling. Nonfinite ratios or nonpositive/nonfinite variances are excluded separately for each estimand, with reasons. No continuity correction, fabricated positive variance or fallback pooled result is added. At least two valid sites are required. Aliasing and other fitting warnings are reported for review. Site point estimates remain available even when excluded; the site forest marks sites excluded on model/support grounds, and the weights/exclusions CSV identifies additional contrast-specific exclusions.
+
+New outputs, all separate from the running 07:
+
+| Location | Contents |
+|---|---|
+| `aggregate/local_ccw_meta/local_ccw_site_results.csv` | Each site's adjusted CCW risks, RD, RR, OR, event-free time and uncertainty |
+| `aggregate/local_ccw_meta/meta_analysis_results.csv` | Random- and fixed-effect pooled contrasts, heterogeneity and prediction intervals |
+| `aggregate/local_ccw_meta/meta_analysis_site_weights_and_exclusions.csv` | Actual inclusion and inverse-variance weights for every contrast |
+| `aggregate/local_ccw_meta/six_method_results.csv` | Original five methods plus the primary random-effects meta-analysis row |
+| `aggregate/local_ccw_meta/six_method_effect_comparison.png` | Six-method forest for RD and restricted mean event-free time difference |
+| `aggregate/local_ccw_meta/six_method_risk_ratio_forest.png` | Six-method RR forest |
+| `aggregate/local_ccw_meta/local_ccw_site_forest.png` | Site effects plus random- and fixed-effect meta-analysis |
+| `sensitive/local_ccw_meta/local_ccw_meta_fits.rds` | Patient-level clone weights, local fits and meta-analysis objects; keep on server |
+
+The original five-method CSV and figures are never overwritten. The sixth row pools **contrasts**, not separate arm risks; arm-specific pooled risk/RMST fields are therefore intentionally blank. Each contrast uses its own inverse-variance weights. This step introduces no Cox regression.

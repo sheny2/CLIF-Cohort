@@ -61,3 +61,10 @@ Rscript 07_prepare_and_run_five_methods.R \
 # Aggregate counts/plots are unsuppressed, including cells below 10.
 # To try a different grace period, edit TREATMENT_GRACE_HOURS above and rerun.
 # The cohort/timing EDA continues to show both 24-hour and 96-hour comparisons.
+
+# 08: independent site-local CCW + random-effects meta-analysis; reads completed 07.
+# Extra package required: install.packages("metafor") in the R environment.
+Rscript 08_local_ccw_meta_analysis.R "$RUN_ROOT" \
+ 2>&1 | tee "$RUN_ROOT/logs/08.log"
+# New six-method forest/results: $RUN_ROOT/aggregate/local_ccw_meta/
+# Original five-method outputs in aggregate/analysis/ remain unchanged.
