@@ -18,3 +18,10 @@ Synthetic data have deliberately small site sample sizes and correlated covariat
 model rank deficiencies/convergence warnings are recorded rather than hidden.
 Passing software checks does not establish model adequacy for the real cohort.
 The actual EHR cohort/results have not been rerun locally. Use the supplied server commands.
+
+Server-crash workaround validation:
+PASS: base-R patient-run block assignment matches the previous grouped version
+on 6,000 synthetic encounters plus nested-overlap/exact-six-hour boundary cases.
+PASS: updated 01 completes on the integration fixture; cohort and selected
+hospitalization crosswalk are unchanged from the pre-workaround outputs.
+The workaround has not yet been verified in the server's native-library environment.

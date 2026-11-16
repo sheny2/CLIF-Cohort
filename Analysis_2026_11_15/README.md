@@ -108,3 +108,7 @@ Confidence intervals retain the existing influence-function approach treating es
 All EDA figures and aggregate tables are unsuppressed by default, including counts below 10. Patient-level data, individual extremes, temperature-fill rows, model objects and weight trajectories go only to sensitive directories. Aggregate output still needs the project's normal disclosure review before export.
 
 Run the included synthetic integration check with `Rscript tests/test_pipeline.R`. It constructs synthetic CLIF tables, runs 01–05 and 07 (sourcing 06), and checks strict S/F eligibility, invalid-temperature removal, nearest future fill auditing, categorical model terms, support proportions, all five estimates, retention of late initiators as controls, and freezing of adherence weights after grace. This is software validation, not validation on the actual EHR cohort.
+
+## Server crash workaround
+
+Script 01 uses single-threaded data.table operations and base-R ordering/patient runs for hospital-block assignment. This avoids the grouped `:=`/`forderv` code path that crashed on the server. Overlap handling, the six-hour gap rule, block IDs and component ordering are unchanged. Runtime R/data.table/Arrow versions are printed in the log. This workaround does not establish the underlying cause of the native-library crash; a matching server environment may still require package maintenance if another operation crashes.

@@ -35,6 +35,11 @@ suppressPackageStartupMessages({
   library(dplyr)
 })
 
+# Native data.table grouping crashed on the server; use one thread explicitly.
+data.table::setDTthreads(1L)
+message("Runtime: R ", getRversion(), "; data.table ", packageVersion("data.table"),
+        "; Arrow ", packageVersion("arrow"), "; data.table threads=", getDTthreads())
+
 # ---- Paths and parameters ----------------------------------------------------
 
 script_arguments <- commandArgs(trailingOnly = FALSE)
@@ -50,6 +55,7 @@ if (length(script_file_argument)) {
 }
 source(file.path(script_dir, "pneumonia_icd_helpers.R"))
 source(file.path(script_dir, "variable_rules.R"))
+source(file.path(script_dir, "hospital_block_helpers.R"))
 
 args <- commandArgs(trailingOnly = TRUE)
 data_dir <- if (length(args) >= 1L && nzchar(args[1L])) args[1L] else
@@ -205,29 +211,6 @@ normalize_truth <- function(x) {
   as.integer(value %in% c("1", "true", "t", "yes", "y"))
 }
 
-assign_blocks_running_end <- function(admission, discharge, threshold_hours) {
-  n <- length(admission)
-  block <- integer(n)
-  gap <- rep(NA_real_, n)
-  running_end <- rep(as.POSIXct(NA, tz = "UTC"), n)
-  current_block <- 0L
-  block_end <- as.POSIXct(NA, tz = "UTC")
-  for (i in seq_len(n)) {
-    if (i > 1L) {
-      gap[i] <- as.numeric(difftime(admission[i], block_end, units = "hours"))
-    }
-    begins_new <- i == 1L || is.na(gap[i]) || gap[i] > threshold_hours
-    if (begins_new) {
-      current_block <- current_block + 1L
-      block_end <- discharge[i]
-    } else if (!is.na(discharge[i]) && discharge[i] > block_end) {
-      block_end <- discharge[i]
-    }
-    block[i] <- current_block
-    running_end[i] <- block_end
-  }
-  list(block = block, gap = gap, running_end = running_end)
-}
 
 pair_to_nearest_fio2 <- function(measurements, fio2_records, value_name) {
   if (!nrow(measurements) || !nrow(fio2_records)) return(data.table())
@@ -420,21 +403,10 @@ valid_hospitalizations <- hospitalization[
     !is.na(admission_dttm) & !is.na(discharge_dttm) &
     admission_dttm < discharge_dttm
 ]
-setorder(valid_hospitalizations, patient_id, admission_dttm, discharge_dttm,
-         hospitalization_id)
-valid_hospitalizations[, c(
-  "hospital_block_number", "gap_hours_from_running_block_end",
-  "running_block_end_dttm"
-) := {
-  assigned <- assign_blocks_running_end(admission_dttm, discharge_dttm,
-                                        block_gap_hours)
-  list(assigned$block, assigned$gap, assigned$running_end)
-}, by = patient_id]
-valid_hospitalizations[, hospital_block_id := paste0(
-  patient_id, "_block_", hospital_block_number
-)]
-valid_hospitalizations[, component_order := seq_len(.N),
-                       by = .(patient_id, hospital_block_id)]
+# Use base ordering and contiguous patient runs, avoiding the grouped :=/forder
+# path that segfaulted on the server. Eligibility and the <=6h rule are unchanged.
+message("Assigning hospital blocks with base-R patient runs...")
+valid_hospitalizations <- assign_patient_blocks_base(valid_hospitalizations, block_gap_hours)
 
 hospital_block_crosswalk_all <- valid_hospitalizations[, .(
   patient_id, hospital_block_id, hospital_block_number, hospitalization_id,

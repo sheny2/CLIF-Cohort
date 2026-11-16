@@ -6,6 +6,8 @@ cd /projects/emulate_icu/CLIF-Cohort/Analysis_2026_11_15
 # Relative to the CLIF-Cohort folder, source data remain ../rclif_2_1.
 # This analysis folder is directly inside CLIF-Cohort.
 export CLIF_DATA_DIR="$(cd ../.. && pwd)/rclif_2_1"
+# Limit native data.table parallelism; 01 also enforces this explicitly.
+export R_DATATABLE_NUM_THREADS=1
 export TREATMENT_GRACE_HOURS=24
 export CLIF_DATA_CUTOFF_DATE=2026-10-31
 export HOSPITAL_BLOCK_GAP_HOURS=6
