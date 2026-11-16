@@ -1,0 +1,20 @@
+Software validation completed 2026-11-15 on synthetic data only.
+
+PASS: all included R scripts parse; bash command file passes bash -n.
+PASS: every local source dependency is included in this folder.
+PASS: synthetic CLIF input tables run through 01, 02, 03, 04, 05, and 07 (which sources 06).
+PASS: HFNO with only SpO2 >97 fails eligibility; high SpO2 supplies no analytic S/F.
+PASS: zero temperature is rejected before selecting an earlier valid temperature.
+PASS: a nearest future temperature fill is retained and explicitly audited.
+PASS: arterial gases/support score absent from model terms; categorical HFNO included.
+PASS: full-cohort respiratory support proportions sum to one at every site/time.
+PASS: all five methods return finite RD, RR and RMST differences for both 24h and 96h.
+PASS: late initiators remain in control risk sets at both grace settings.
+PASS: raw adherence weights freeze after grace when there is no natural censoring.
+PASS: raw/clipped weight diagnostics, exact risk-set ESS, coefficients and fit diagnostics export.
+PASS: sample categorical-support plot inspected for readable labels and layout.
+
+Synthetic data have deliberately small site sample sizes and correlated covariates;
+model rank deficiencies/convergence warnings are recorded rather than hidden.
+Passing software checks does not establish model adequacy for the real cohort.
+The actual EHR cohort/results have not been rerun locally. Use the supplied server commands.
