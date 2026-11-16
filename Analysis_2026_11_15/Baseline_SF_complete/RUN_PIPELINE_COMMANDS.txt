@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Read-only reuse of an existing main-analysis cohort and steroid definitions.
+# Usage from this folder: bash RUN_PIPELINE_COMMANDS.txt /path/to/main/results/run_...
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BASE_RUN_ROOT="${1:-${BASE_RUN_ROOT:-}}"
+if [[ -z "$BASE_RUN_ROOT" ]]; then
+  echo 'Supply the original main run folder as argument 1, or set BASE_RUN_ROOT.' >&2
+  echo 'Example: bash RUN_PIPELINE_COMMANDS.txt /projects/emulate_icu/CLIF-Cohort/Analysis_2026_11_15/results/run_...' >&2
+  exit 1
+fi
+BASE_RUN_ROOT="$(cd "$BASE_RUN_ROOT" && pwd)"
+if [[ -n "${CLIF_DATA_DIR:-}" ]]; then
+ export CLIF_DATA_DIR="$(cd "$CLIF_DATA_DIR" && pwd)"
+else
+ export CLIF_DATA_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)/rclif_2_1"
+fi
+cd "$SCRIPT_DIR"
+export TREATMENT_GRACE_HOURS="${TREATMENT_GRACE_HOURS:-24}"
+export CLIF_DATA_CUTOFF_DATE="${CLIF_DATA_CUTOFF_DATE:-2026-10-31}"
+export R_DATATABLE_NUM_THREADS=1
+export COHORT_OUTPUT_DIR="$BASE_RUN_ROOT/sensitive/cohort"
+export STEROID_TREATMENT_DIR="$BASE_RUN_ROOT/sensitive/steroid_treatment"
+for path in "$CLIF_DATA_DIR" "$COHORT_OUTPUT_DIR/adult_pneumonia_cohort.parquet" \
+ "$COHORT_OUTPUT_DIR/adult_pneumonia_hospitalization_crosswalk.parquet" \
+ "$STEROID_TREATMENT_DIR/qualifying_steroid_administrations.parquet" \
+ "$STEROID_TREATMENT_DIR/steroid_treatment_assignment.parquet"; do
+ if [[ ! -e "$path" ]]; then echo "Missing input: $path" >&2; exit 1; fi
+done
+# A different requested grace period needs matching 04 treatment assignment for
+# the EDA. 07/08 use all qualifying doses and the requested grace directly.
+export RUN_ROOT="$SCRIPT_DIR/results/run_$(date +%Y%m%d_%H%M%S)_baselineSF_grace${TREATMENT_GRACE_HOURS}h"
+export SUMMARY_EDA_DIR="$RUN_ROOT/aggregate/eda"
+mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/aggregate"
+printf 'Baseline-SF-complete sensitivity\nSource run (read only): %s\nGrace hours: %s\n' \
+ "$BASE_RUN_ROOT" "$TREATMENT_GRACE_HOURS" > "$RUN_ROOT/aggregate/RUN_INPUTS.txt"
+# 01--04 copies are included for completeness but are not rerun by this command.
+Rscript 05_cohort_summary_eda.R "$CLIF_DATA_DIR" "$COHORT_OUTPUT_DIR" \
+ "$STEROID_TREATMENT_DIR" "$SUMMARY_EDA_DIR" 1 "$CLIF_DATA_CUTOFF_DATE" \
+ "$RUN_ROOT/sensitive/eda_preparation" 2>&1 | tee "$RUN_ROOT/logs/05.log"
+# 06 is automatically sourced by 07.
+Rscript 07_prepare_and_run_five_methods.R "$CLIF_DATA_DIR" "$COHORT_OUTPUT_DIR" \
+ "$STEROID_TREATMENT_DIR" "$RUN_ROOT" "$CLIF_DATA_CUTOFF_DATE" \
+ 2>&1 | tee "$RUN_ROOT/logs/07.log"
+# Extra dependency: install.packages("metafor") in the R environment.
+Rscript 08_local_ccw_meta_analysis.R "$RUN_ROOT" 2>&1 | tee "$RUN_ROOT/logs/08.log"
+# All new results are inside this sensitivity folder's results/.
+# No source-run files or original code/results are overwritten.

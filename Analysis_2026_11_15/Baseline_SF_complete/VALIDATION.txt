@@ -1,0 +1,20 @@
+Baseline S/F-complete sensitivity: software validation on synthetic data.
+
+PASS: baseline selection uses latest valid pre-time-zero SpO2 and FiO2, each
+within 12 hours, with the original time zero unchanged.
+PASS: a newer valid saturation >97% prevents eligibility even when an older
+lower saturation exists; future readings and blank vital categories cannot
+establish eligibility. Invalid zero values are screened before temporal selection.
+PASS: inclusive 12-hour/97% boundaries and percent-form FiO2 normalization.
+PASS: full synthetic 01--05/07 pipeline completes with 346 of 349 source patients
+retained; EDA and model populations/outcome counts agree.
+PASS: patients with high later SpO2 retain subsequent follow-up rows.
+PASS: no current/lagged sf_ratio model or missingness terms enter IPCW;
+complete baseline_sf_model is constant per patient and enters as baseline.
+PASS: five-method analyses at 24h and 96h, plus site-local CCW/meta-analysis
+and six-method/site forest outputs at both grace settings.
+PASS: local baseline S/F transformations use one observation per local patient.
+PASS: all sensitivity R scripts parse and bash commands pass syntax validation.
+PASS: SHA-256 checks confirm all pre-existing parent-folder files are unchanged.
+No real EHR sensitivity run was executed locally; the retained real-data count
+must be recalculated on the server. No source main-run files are overwritten.
