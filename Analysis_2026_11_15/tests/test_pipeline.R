@@ -22,7 +22,7 @@ write(data.table(patient_id=patient,sex_category=sample(c("male","female"),n,TRU
 sites <- rep(c("JHH","BMC","SMH","HCG","SUB"),length.out=n)
 write(data.table(patient_id=patient,hospitalization_id=hospital,admission_dttm=t0-4*3600,
  discharge_dttm=t0+dischargehours*3600,age_at_admission=sample(25:90,n,TRUE),admission_type_category="ed",
- discharge_category=ifelse(dead&deathhours==dischargehours,"expired","home"),hospital_id=sites),"hospitalization")
+ discharge_category=ifelse(dead&deathhours==dischargehours,"expired",ifelse(seq_len(n)%%17==0,"hospice","home")),hospital_id=sites),"hospitalization")
 dx <- data.table(hospitalization_id=hospital,diagnosis_code="J18.9",diagnosis_code_format="ICD10CM",diagnosis_primary=TRUE,poa_present=TRUE)
 chronic <- data.table(hospitalization_id=hospital,diagnosis_code=sample(c("J44","E1165","D80","C78","C90","I50","N18","I10"),n,TRUE),
  diagnosis_code_format="ICD10CM",diagnosis_primary=FALSE,poa_present=TRUE)
@@ -86,21 +86,29 @@ eda<-file.path(work,"eda");eda_sensitive<-file.path(work,"eda_sensitive")
 run("05_cohort_summary_eda.R",c(data,cohort,treatment,eda,"1","2026-10-31",eda_sensitive))
 result<-file.path(work,"result")
 run("07_prepare_and_run_five_methods.R",c(data,cohort,treatment,result,"2026-10-31"))
-long<-as.data.table(read_parquet(file.path(result,"sensitive","pneumonia_ccw_long.parquet")))
+long<-as.data.table(read_parquet(file.path(result,"sensitive","analysis","pneumonia_ccw_long.parquet")))
+primary <- as.data.table(read_parquet(file.path(result,"sensitive","analysis","pneumonia_ccw_cohort.parquet")))
+stopifnot(primary[post_discharge_death_ignored & !grepl("hospice|expired",tolower(discharge_category)),all(delta==0L)],
+          primary[event_type=="hospice_discharge",sum(delta==1L)]>0L)
+stopifnot(setequal(list.dirs(result,full.names=FALSE,recursive=FALSE),c("aggregate","sensitive")))
+overall <- fread(file.path(eda,"cohort_overall_summary.csv"))
+stopifnot(as.integer(overall[parameter=="outcome_within_28d_n",value])==sum(primary$delta))
+timing <- fread(file.path(eda,"outcome_and_treatment_six_hour_counts.csv"))
+stopifnot(sum(timing[event_type=="In-hospital death or hospice discharge",n_reportable])==sum(primary$delta))
 stopifnot(!any(grepl("^(ph|paco2|support_score)(_|$)",names(long))))
 stopifnot(all(is.na(long$sf_ratio[long$spo2>97])))
-estimates <- fread(file.path(result,"aggregate","five_method_results.csv"))
+estimates <- fread(file.path(result,"aggregate","analysis","five_method_results.csv"))
 stopifnot(nrow(estimates)==5,all(is.finite(as.matrix(estimates[,.(risk_difference,risk_ratio,rmst_difference_days)]))))
-fill<-as.data.table(read_parquet(file.path(result,"sensitive","temperature_nearest_fill_rows.parquet")))
+fill<-as.data.table(read_parquet(file.path(result,"sensitive","analysis","temperature_nearest_fill_rows.parquet")))
 b2<-c[patient_id=="p0002",hospital_block_id]
 stopifnot(fill[hospital_block_id==b2&m==1,future_reading],fill[hospital_block_id==b2&m==1,distance_hours]==2)
 b1<-c[patient_id=="p0001",hospital_block_id]
 stopifnot(fill[hospital_block_id==b1&m==1,temperature]>25,!fill[hospital_block_id==b1&m==1,fallback_used])
-spec<-fread(file.path(result,"aggregate","ipcw_model_specification.csv"))
+spec<-fread(file.path(result,"aggregate","analysis","ipcw_model_specification.csv"))
 stopifnot(!any(grepl("support_score|paco2|^ph_",spec$term)),any(grepl("support_hfno",spec$term)))
 states<-fread(file.path(eda,"respiratory_support_proportions_full_cohort.csv"))
 stopifnot(all(abs(states[,sum(proportion),by=.(site,hours)]$V1-1)<1e-10))
-diag<-readRDS(file.path(result,"sensitive","weight_diagnostics_patient_level.rds"))
+diag<-readRDS(file.path(result,"sensitive","analysis","weight_diagnostics_patient_level.rds"))
 for(component in diag$site_components) {
  late<-which(component$S>diag$config$tau&component$S<=diag$config$horizon)
  for(i in late)stopifnot(component$R0[i,component$S[i]])
@@ -111,7 +119,7 @@ for(component in diag$site_components) {
 Sys.setenv(TREATMENT_GRACE_HOURS=96)
 result96 <- file.path(work,"result96")
 run("07_prepare_and_run_five_methods.R",c(data,cohort,treatment,result96,"2026-10-31"))
-diag96 <- readRDS(file.path(result96,"sensitive","weight_diagnostics_patient_level.rds"))
+diag96 <- readRDS(file.path(result96,"sensitive","analysis","weight_diagnostics_patient_level.rds"))
 stopifnot(diag96$config$tau==16L)
 late96 <- 0L
 for(component in diag96$site_components) {
@@ -121,4 +129,4 @@ for(component in diag96$site_components) {
  stopifnot(all(abs(component$raw_W0[,17]-component$raw_W0[,16])<1e-10))
 }
 stopifnot(late96>0)
-cat("PASS: full 01--07 synthetic pipeline, screening, S/F eligibility, temperature filling, categorical support, five methods and raw-weight diagnostics.\nFixture/output: ",work,"\n",sep="")
+cat("PASS: full 01--07 pipeline, composite endpoint agreement across EDA/methods, two-folder outputs, 24h/96h strategies, and weight diagnostics.\nFixture/output: ",work,"\n",sep="")

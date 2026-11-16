@@ -70,7 +70,7 @@ if (!nzchar(data_dir)) {
   )
 }
 output_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
-  file.path(script_dir, "pipeline_output", "sensitive", "cohort")
+  file.path(script_dir, "results", "default", "sensitive", "cohort")
 
 case_definition <- if (length(args) >= 3L && nzchar(args[3L])) args[3L] else
   Sys.getenv("PNEUMONIA_CASE_DEFINITION", unset = "poa_any")

@@ -4,16 +4,17 @@ write_covariate_eda <- function(long,cohort,out,tau,step_hours) {
  write <- function(x,f) fwrite(x,file.path(out,f),na="")
  # Full baseline cohort denominator: explicit death/discharge/admin censoring states.
  g <- cohort[,.(m=seq_len(112L)),by=.(hospital_block_id,site,index_dttm,
-             discharge_dttm,event_hours,delta,censor_hours)]
+             discharge_dttm,event_hours,event_type,delta,censor_hours)]
  g[,hours:=(m-1)*step_hours]
  g <- merge(g,long[,.(hospital_block_id,m,support_category)],by=c("hospital_block_id","m"),all.x=TRUE)
- g[, state := fcase(delta==1L & is.finite(event_hours)&event_hours<=hours,"Died",
+ g[, state := fcase(delta==1L & is.finite(event_hours)&event_hours<=hours & event_type=="in_hospital_death","In-hospital death",
+   delta==1L & is.finite(event_hours)&event_hours<=hours & event_type=="hospice_discharge","Hospice discharge",
    is.finite(censor_hours)&censor_hours<=hours,"Administratively censored",
    as.numeric(index_dttm)+hours*3600>as.numeric(discharge_dttm),"Discharged alive",
    !is.na(support_category),support_category,default="Unknown")]
- # 'Discharged alive' denotes having left the selected block and not yet observed
- # dead: subsequent readmissions outside that block are not assigned a modality.
- g[,state:=factor(state,levels=c(SUPPORT_LEVELS,"Unknown","Discharged alive","Died","Administratively censored"))]
+ # Other alive discharge is a resolved non-event for the selected block.
+ # Death outside that block does not change this state; hospice is separate.
+ g[,state:=factor(state,levels=c(SUPPORT_LEVELS,"Unknown","Discharged alive","In-hospital death","Hospice discharge","Administratively censored"))]
  summarize_support <- function(z,group) {
   counts <- z[,.(patients=.N),by=c(group,"state")]
   denom <- z[,.(denominator=.N),by=group]
@@ -23,7 +24,7 @@ write_covariate_eda <- function(long,cohort,out,tau,step_hours) {
  bysite <- summarize_support(g,c("site","hours"))
  all <- rbindlist(list(overall,bysite),use.names=TRUE)
  write(all,"respiratory_support_proportions_full_cohort.csv")
- inhospital <- g[!as.character(state)%chin%c("Discharged alive","Died","Administratively censored")]
+ inhospital <- g[!as.character(state)%chin%c("Discharged alive","In-hospital death","Hospice discharge","Administratively censored")]
  if(nrow(inhospital)) {
   b <- summarize_support(inhospital,c("site","hours"))
   pooled <- summarize_support(inhospital,"hours");pooled[,site:="All sites"]
@@ -44,10 +45,10 @@ write_covariate_eda <- function(long,cohort,out,tau,step_hours) {
     geom_area(position="stack")+
     scale_fill_manual(values=c(room_air="#66C2A5",conventional_oxygen="#3288BD",hfno="#FEE08B",
       nippv_cpap="#FDAE61",imv="#D53E4F",Unknown="#999999",`Discharged alive`="#ABD9E9",
-      Died="#333333",`Administratively censored`="#DDDDDD"),drop=FALSE,
+      `In-hospital death`="#333333",`Hospice discharge`="#AA4499",`Administratively censored`="#DDDDDD"),drop=FALSE,
       labels=c(room_air="Room air",conventional_oxygen="Conventional oxygen",hfno="HFNO",
        nippv_cpap="NIPPV/CPAP",imv="IMV",Unknown="Unknown",`Discharged alive`="Discharged alive",
-       Died="Died",`Administratively censored`="Administratively censored"))+
+       `In-hospital death`="In-hospital death",`Hospice discharge`="Hospice discharge",`Administratively censored`="Administratively censored"))+
     guides(fill=guide_legend(nrow=3,byrow=TRUE))+facet_wrap(~site,ncol=2)+
     geom_vline(xintercept=c(24,96)/24,linetype=3)+
     scale_y_continuous(labels=function(x)paste0(round(100*x),"%"))+coord_cartesian(ylim=c(0,1))+

@@ -25,3 +25,15 @@ on 6,000 synthetic encounters plus nested-overlap/exact-six-hour boundary cases.
 PASS: updated 01 completes on the integration fixture; cohort and selected
 hospitalization crosswalk are unchanged from the pre-workaround outputs.
 The workaround has not yet been verified in the server's native-library environment.
+
+Composite-outcome and directory-layout revision:
+PASS: shared helper counts in-block death and hospice discharge, uses Expired
+fallback, excludes deaths after other alive discharges, and includes day 28 exactly.
+PASS: EDA composite-event totals and six-hour timing counts agree with the
+prepared analysis cohort's event count.
+PASS: full 01--07 synthetic integration run completes at both 24h and 96h;
+all five methods return finite RD, RR and restricted mean event-free time contrasts.
+PASS: script 07 writes only aggregate/analysis and sensitive/analysis below its
+run root, with no extra top-level analysis directory.
+PASS: R parsing, shell syntax, and whitespace checks.
+The actual EHR data still require a fresh server run under the new outcome.

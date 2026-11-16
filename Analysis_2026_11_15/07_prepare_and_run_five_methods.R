@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # Dated standalone early versus later/never initiation analysis.
 # Run after 01--05; sources the local 06 method library automatically.
-# Usage: Rscript 07_prepare_and_run_five_methods.R CLIF_DATA_DIR [COHORT_DIR] [TREATMENT_DIR] [NEW_OUTPUT_DIR] [DATA_CUTOFF_DATE]
+# Usage: Rscript 07_prepare_and_run_five_methods.R CLIF_DATA_DIR [COHORT_DIR] [TREATMENT_DIR] [RUN_ROOT] [DATA_CUTOFF_DATE]
 # Default TREATMENT_GRACE_HOURS=24; see README for measurement processing.
 # Requires only helpers included in this folder; no parent-folder dependencies.
 suppressPackageStartupMessages({library(arrow);library(data.table);library(dplyr);library(ggplot2);library(survival)})
@@ -10,20 +10,21 @@ sf <- sub("^--file=","",grep("^--file=",commandArgs(FALSE),value=TRUE)[1])
 root <- dirname(normalizePath(gsub("~+~"," ",sf,fixed=TRUE)))
 source(file.path(root,"06_generalized_five_methods.R"))
 source(file.path(root,"variable_rules.R"))
+source(file.path(root,"outcome_helpers.R"))
 source(file.path(root,"analysis_eda_helpers.R"))
 source(file.path(root,"analysis_preparation.R"))
 source(file.path(root,"weight_diagnostics.R"))
 arg <- function(i,default) if(length(a)>=i && nzchar(a[i])) a[i] else default
 data_dir <- arg(1,Sys.getenv("CLIF_DATA_DIR","/projects/emulate_icu/rclif_2_1"))
-cohort_dir <- arg(2,Sys.getenv("COHORT_OUTPUT_DIR",file.path(root,"pipeline_output/sensitive/cohort")))
-treatment_dir <- arg(3,Sys.getenv("STEROID_TREATMENT_DIR",file.path(root,"pipeline_output/sensitive/steroid_treatment")))
-out <- arg(4,file.path(root,"pipeline_output",paste0("analysis_",format(Sys.time(),"%Y%m%d_%H%M%S"))))
+cohort_dir <- arg(2,Sys.getenv("COHORT_OUTPUT_DIR",file.path(root,"results/default/sensitive/cohort")))
+treatment_dir <- arg(3,Sys.getenv("STEROID_TREATMENT_DIR",file.path(root,"results/default/sensitive/steroid_treatment")))
+out <- arg(4,file.path(root,"results",paste0("run_",format(Sys.time(),"%Y%m%d_%H%M%S"))))
 cutoff_text <- arg(5,Sys.getenv("CLIF_DATA_CUTOFF_DATE","2026-10-31"))
 grace_hours <- suppressWarnings(as.numeric(Sys.getenv("TREATMENT_GRACE_HOURS","24")))
 if(!is.finite(grace_hours) || grace_hours<6 || grace_hours>=672 || grace_hours%%6!=0) stop("Grace hours must be a multiple of 6 below 672")
 if(normalizePath(out,mustWork=FALSE)%in%vapply(c(data_dir,cohort_dir,treatment_dir),normalizePath,character(1),mustWork=FALSE)) stop("Use a separate output folder")
-agg <- shareable_dir <- file.path(out,"aggregate")
-sensitive <- sensitive_dir <- file.path(out,"sensitive")
+agg <- shareable_dir <- file.path(out,"aggregate","analysis")
+sensitive <- sensitive_dir <- file.path(out,"sensitive","analysis")
 dir.create(agg,recursive=TRUE,showWarnings=FALSE);dir.create(sensitive,recursive=TRUE,showWarnings=FALSE)
 write_agg <- write_shareable_csv <- function(x,f) {
  if(any(c("patient_id","hospitalization_id","hospital_block_id",".uid","subject")%in%names(x))) stop("Identifier in aggregate output")
@@ -32,20 +33,20 @@ write_agg <- write_shareable_csv <- function(x,f) {
 write_sensitive_csv <- function(x,f) fwrite(x,file.path(sensitive,f),na="")
 state <- prepare_analysis_inputs(data_dir,cohort_dir,treatment_dir,sensitive,agg,grace_hours,cutoff_text,0L)
 invisible(list2env(state,envir=environment()));rm(state)
-site_summary <- cohort[,.(patients=.N,deaths_28d=sum(delta)),by=site]
+site_summary <- cohort[,.(patients=.N,events_28d=sum(delta)),by=site]
 cohort[, initiation_group := fcase(S<=tau,"Within grace period",S<=M,"Later initiation",default="No observed initiation through day 28")]
-write_agg(cohort[,.(patients=.N,deaths_28d=sum(delta)),by=.(site,initiation_group)],"initiation_groups_by_site.csv")
-write_agg(data.table(parameter=c("strategy_1","strategy_0","grace_hours","horizon_days","missing_data_rules"),
- value=c(design$strategy_1,design$strategy_0,as.character(grace_hours),as.character(horizon_days),"nearest valid temperature; categorical support; strict S/F; gases excluded")),"early_initiation_design.csv")
+write_agg(cohort[,.(patients=.N,events_28d=sum(delta)),by=.(site,initiation_group)],"initiation_groups_by_site.csv")
+write_agg(data.table(parameter=c("strategy_1","strategy_0","grace_hours","horizon_days","missing_data_rules","outcome"),
+ value=c(design$strategy_1,design$strategy_0,as.character(grace_hours),as.character(horizon_days),"nearest valid temperature; categorical support; strict S/F; gases excluded",PRIMARY_OUTCOME)),"early_initiation_design.csv")
 writeLines(c("Initiation within grace versus no initiation within grace; later initiation is allowed in controls.",
  "Control clones are censored only for initiation within grace. Later initiation does not censor them.",
  "Treatment/adherence weights freeze at grace end; natural-censoring weights, if applicable, can continue.",
  "All other preparation, six-hour grid/event boundary conventions and 1st/99th percentile weight truncation follow the original methods.",
  "Temperature gaps use nearest valid same-block measurements, with future-use audits. Other numeric gaps use decision-risk-set medians plus indicators.",
- "Landmark already classified early versus later/never, so its definition and results should remain unchanged.",
- "Observed early-treatment labels do not replace CCW cloning: deaths during grace remain handled by the inherited clone risk sets.",
+ "All five methods, including landmark, use in-hospital death or hospice discharge by day 28.",
+ "Observed early-treatment labels do not replace CCW cloning: primary events during grace remain handled by the inherited clone risk sets.",
  "HFNO eligibility requires SpO2 <=97%; other cohort eligibility and steroid definitions follow the original pipeline."
- ),file.path(out,"EARLY_INITIATION_RULES.txt"))
+ ),file.path(agg,"EARLY_INITIATION_RULES.txt"))
 message("Running the five methods...")
 analysis_warnings <- character()
 analysis <- withCallingHandlers(
@@ -505,9 +506,10 @@ summary <- rbindlist(lapply(names(analysis$fits), function(method) {
   fit <- analysis$fits[[method]]
   data.table(
     method_key = method,
+    outcome = PRIMARY_OUTCOME,
     method = unname(method_labels[method]),
-    death_risk_treatment = as.numeric(fit$psi1),
-    death_risk_no_treatment = as.numeric(fit$psi0),
+    outcome_risk_treatment = as.numeric(fit$psi1),
+    outcome_risk_no_treatment = as.numeric(fit$psi0),
     risk_difference = as.numeric(fit$RD),
     risk_difference_se = fit$SE_RD %||% NA_real_,
     risk_difference_lower = if (!is.null(fit$CI_RD)) fit$CI_RD[1L] else NA_real_,
@@ -553,15 +555,15 @@ curves <- rbindlist(lapply(names(analysis$fits), function(method) {
       each = M + 1L
     ),
     day = rep(seq.int(0, M) * step_hours / 24, times = 2L),
-    survival = c(fit$S1, fit$S0)
+    event_free_probability = c(fit$S1, fit$S0)
   )
 }))
 curves[, method := factor(method, levels = unname(method_labels))]
-write_shareable_csv(curves, "five_method_survival_curves.csv")
+write_shareable_csv(curves, "five_method_event_free_curves.csv")
 
-survival_plot <- ggplot(
+event_free_plot <- ggplot(
   curves,
-  aes(x = day, y = survival, color = strategy, linetype = strategy)
+  aes(x = day, y = event_free_probability, color = strategy, linetype = strategy)
 ) +
   geom_step(linewidth = 0.75) +
   facet_wrap(~ method, ncol = 2) +
@@ -571,21 +573,21 @@ survival_plot <- ggplot(
   )) +
   coord_cartesian(ylim = c(0, 1)) +
   labs(
-    title = "Severe CAP: five-method survival comparison",
+    title = "Severe CAP: freedom from in-hospital death or hospice discharge",
     subtitle = paste(
       "Qualifying glucocorticoid initiation within the grace period vs",
       "no initiation within the grace period; later initiation allowed; five Hopkins hospitals"
     ),
         x = "Days since respiratory-failure start",
-    y = "Estimated survival probability",
+    y = "Estimated probability free of the primary outcome",
     color = NULL,
     linetype = NULL
   ) +
   theme_minimal(base_size = 11) +
   theme(legend.position = "bottom", panel.grid.minor = element_blank())
 ggsave(
-  file.path(shareable_dir, "five_method_survival_comparison.png"),
-  survival_plot,
+  file.path(shareable_dir, "five_method_event_free_comparison.png"),
+  event_free_plot,
   width = 11,
   height = 10,
   dpi = 250
@@ -601,7 +603,7 @@ effect_data <- rbindlist(list(
   )],
   summary[, .(
     method,
-    estimand = "28-day RMST difference (days)",
+    estimand = "28-day restricted mean event-free time difference (days)",
     estimate = rmst_difference_days,
     lower = rmst_difference_lower_days,
     upper = rmst_difference_upper_days
@@ -620,7 +622,7 @@ effect_plot <- ggplot(effect_data, aes(x = estimate, y = method)) +
   facet_wrap(~ estimand, scales = "free_x", ncol = 1) +
   labs(
     title = "Estimated glucocorticoid strategy contrasts",
-    subtitle = "Positive risk difference indicates higher mortality; positive RMST difference indicates longer survival",
+    subtitle = "Positive risk difference indicates more in-hospital death/hospice events; positive RMST difference indicates more event-free time",
     x = "Estimate",
     y = NULL
   ) +
@@ -650,8 +652,8 @@ saveRDS(
   file.path(sensitive_dir, "five_method_results.rds")
 )
 
-cat("\nObserved cohort mortality summary:\n")
-print(cohort_mortality_summary)
+cat("\nObserved cohort primary-outcome summary:\n")
+print(cohort_outcome_summary)
 cat("\nHospital summary:\n")
 print(site_summary)
 cat("\nFive-method summary:\n")
@@ -659,4 +661,4 @@ print(summary)
 cat("\nSensitive results saved to:\n", normalizePath(sensitive_dir), "\n")
 cat("Shareable results saved to:\n", normalizePath(shareable_dir), "\n")
 
-writeLines("Complete",file.path(out,"COMPLETE.txt"))
+writeLines("Complete",file.path(agg,"COMPLETE.txt"))

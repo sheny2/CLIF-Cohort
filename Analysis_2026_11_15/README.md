@@ -1,12 +1,12 @@
 # Standalone CLIF analysis — November 15, 2026
 
-This folder contains a complete 01–07 pipeline. It does not source any script from the parent CLIF-Cohort folder and does not change the original, CAPE COD-aligned, or proposal-aligned analyses. Raw CLIF data remain in `../rclif_2_1` relative to CLIF-Cohort; from this analysis folder the source data path is `../../rclif_2_1`. The supplied commands use the renamed `Analysis_2026_11_15` folder. All results go into a new timestamped directory under this folder's `results/`.
+This folder contains a complete 01–07 pipeline. It does not source any script from the parent CLIF-Cohort folder and does not change the original, CAPE COD-aligned, or proposal-aligned analyses. Raw CLIF data remain in `../rclif_2_1` relative to CLIF-Cohort; from this analysis folder the source data path is `../../rclif_2_1`. The supplied commands use the renamed `Analysis_2026_11_15` folder. All results go into a new timestamped directory under this folder's `results/`, containing only `aggregate/`, `sensitive/`, and `logs/` at the top level.
 
 ## Run
 
 Install R packages `arrow`, `data.table`, `dplyr`, `ggplot2`, and `survival`. Open `RUN_PIPELINE_COMMANDS.txt`, adjust the first server path and administrative cutoff if necessary, and execute its commands in bash/zsh. Script 06 is a library automatically sourced by 07. There is no Cox analysis in this version.
 
-The default grace period is **24 hours**, with six-hour intervals and 28-day mortality follow-up. Set `TREATMENT_GRACE_HOURS` to another positive multiple of six below 672 to change it. Results record the actual setting; figure names describe the grace period without assuming a fixed length. Timing EDA compares both 24 and 96 hours.
+The default grace period is **24 hours**, with six-hour intervals and 28-day follow-up for in-hospital death or hospice discharge. Set `TREATMENT_GRACE_HOURS` to another positive multiple of six below 672 to change it. Results record the actual setting; figure names describe the grace period without assuming a fixed length. Timing EDA compares both 24 and 96 hours.
 
 ## Scripts
 
@@ -16,7 +16,7 @@ The default grace period is **24 hours**, with six-hour intervals and 28-day mor
 | 02 | Inventory glucocorticoid source fields and routes |
 | 03 | Extract steroid candidates for the selected blocks |
 | 04 | Apply existing systemic drug/dose/route rules; retain qualifying administrations throughout follow-up |
-| 05 | Cohort and treatment/death timing summaries; screened measurement ranges, missingness, temperature-fill audit, categorical support proportions and transitions |
+| 05 | Cohort and treatment/primary-event timing summaries; screened measurement ranges, missingness, temperature-fill audit, categorical support proportions and transitions |
 | 06 | Five-method library; early versus later/never initiation, with raw and clipped weights retained for diagnostics |
 | 07 | Independently prepare covariates, fit all five methods, produce estimates, balance plots, explicit model specifications and weight diagnostics |
 
@@ -37,7 +37,16 @@ Only initiation during grace artificially censors a control clone. Later initiat
 
 The methods are federated CCW, pooled site-stratified CCW, landmark IPW, IPCW without cloning, and unweighted per-protocol. Federated/pooled CCW are numerically identical by construction. The latter two observed-group analyses remain exploratory and vulnerable to treatment-timing bias. Landmark restricts to patients alive/observed at grace end and uses the inherited last grace-interval measurements; these may already be affected by early treatment.
 
-Six-hour event/initiation discretization and clone boundary conventions are inherited, including censoring an untreated-by-deadline treatment clone before the final grace interval. Death during grace is not removed from the baseline cohort. Alive discharge does not censor mortality follow-up. Death timestamps are supplemented with expired-discharge time only if the patient death timestamp is absent; otherwise administrative censoring uses the supplied data cutoff. Absence of a death timestamp is still treated as no observed death, subject to the original ascertainment assumptions.
+The primary outcome throughout EDA and all five methods is **in-hospital death or hospice discharge by day 28**, measured from respiratory-failure start in the selected hospitalization block:
+
+- A `death_dttm` within that block supplies the in-hospital death time. If discharge is `Expired` and no usable in-block death timestamp exists, use discharge time.
+- A discharge category containing `hospice` supplies a hospice event at discharge time. If both components occur, use the earlier event, counting the patient once.
+- Death after another alive discharge is excluded, even when a later death timestamp is recorded. Other alive discharges remain non-events for this endpoint; discharge is not censoring. Subsequent separate readmissions are not added to the selected block.
+- Events after day 28 do not count. Follow-up is administratively censored at the supplied data cutoff when needed.
+
+`outcome_definition.csv` and `outcome_ascertainment_audit.csv` document these rules, component counts, and ignored post-discharge death timestamps. Plot/table labels describe the composite outcome. The former survival curves now show **freedom from the primary outcome**, and RMST means **restricted mean event-free time**, not all-cause survival time.
+
+Six-hour event/initiation discretization and clone boundary conventions are inherited, including censoring an untreated-by-deadline treatment clone before the final grace interval. Composite events during grace are not removed from the baseline cohort.
 
 ## Measurement screening and missingness
 
@@ -61,7 +70,7 @@ Six-hour event/initiation discretization and clone boundary conventions are inhe
 
 No automatic lab-unit conversion is inferred from extreme values. Lab aliases explicitly distinguish serum/blood measurements. **Arterial pH and arterial PaCO2 are excluded a priori**, including their missingness indicators and lags. Venous gases do not replace them.
 
-Temperature first uses the latest valid prior reading within 12 hours. For remaining gaps **while the patient is within the selected hospital block**, use the nearest valid reading from the same block in either temporal direction; ties favor the earlier reading. No maximum fallback distance is imposed. Candidate readings must be within block admission/discharge, no later than recorded death or administrative cutoff. No other patient or block supplies a temperature, and post-discharge rows do not receive new nearest-temperature fills. If a block has no valid temperature, its gap remains missing and is handled with the numeric imputation below.
+Temperature first uses the latest valid prior reading within 12 hours. For remaining gaps **while the patient is within the selected hospital block**, use the nearest valid reading from the same block in either temporal direction; ties favor the earlier reading. No maximum fallback distance is imposed. Candidate readings must be within block admission/discharge, no later than the primary event or administrative cutoff. No other patient or block supplies a temperature, and post-discharge rows do not receive new nearest-temperature fills. If a block has no valid temperature, its gap remains missing and is handled with the numeric imputation below.
 
 **Nearest temperature can use future/post-treatment measurements.** This is the requested adjacent-reading rule, not a strictly prospective covariate definition. `temperature_nearest_fill_audit.csv` reports counts of future fills, remaining gaps, distances and fills over 24 hours. The detailed row audit is sensitive. This rule may introduce bias; review those counts before interpreting estimates.
 
@@ -82,7 +91,7 @@ The non-respiratory SOFA **proxy** uses platelets, bilirubin, MAP, creatinine an
 
 The model uses separate binary indicators for conventional oxygen, HFNO, NIPPV/CPAP, IMV and unknown; room air is the reference. Constant indicators are omitted. No numeric ordinal support score is entered. Baseline eligibility support retains separate IMV and NIPPV/CPAP indicators with HFNO as reference. Within an identical timestamp, the highest mapped intensity is selected deterministically; this ordering is only a tie-break and is not a numeric model effect. Unmapped/blank source rows cannot supply a known category; the latest mapped prior category may still be carried forward for up to 12 hours.
 
-EDA counts **one patient per six-hour time point**. Full-cohort proportions include separate death, discharge and administrative-censoring states; a second summary conditions on being alive and within the selected hospital block and includes unknown documentation. Discharge status means the patient has left this selected block and has no observed death yet; later readmission outside the block is not assigned a support mode. Transitions summarize consecutive six-hour states, not every change between raw chart entries. Neither plot is a causal treatment-effect estimate.
+EDA counts **one patient per six-hour time point**. Full-cohort proportions include separate in-hospital-death, hospice-discharge, other-alive-discharge and administrative-censoring states; a second summary conditions on being alive and within the selected hospital block and includes unknown documentation. Other alive-discharge status means the patient has left this selected block without the primary event; later readmission outside the block is not assigned a support mode. Transitions summarize consecutive six-hour states, not every change between raw chart entries. Neither plot is a causal treatment-effect estimate.
 
 ## IPCW covariates and diagnostics
 
@@ -90,9 +99,9 @@ Candidate baseline variables: age, female/sex missingness, baseline support cate
 
 Candidate current variables: temperature, WBC, serum glucose, albumin, eligible S/F, non-respiratory SOFA proxy, categorical support indicators, and applicable numeric missingness indicators. The initiation denominator includes current and one-interval lagged versions plus baseline terms and interval time. Initial lags are zero, following the original convention. The natural-censoring denominator includes time, baseline terms, and treatment history; its numerator includes time. The actual post-availability-check list is **`ipcw_model_specification.csv`**; `covariate_availability_and_processing.csv` records transformations.
 
-Key outputs under `analysis/aggregate/`:
+Key outputs under `aggregate/analysis/`:
 
-- `five_method_results.csv`: risks, RD, RR, OR, RMST and confidence intervals for all five methods; effect and survival figures.
+- `five_method_results.csv`: risks, RD, RR, OR, RMST and confidence intervals for all five methods; effect and event-free probability figures.
 - `ipcw_model_specification.csv`: exact terms grouped as baseline, current, lagged, time and treatment.
 - `covariate_balance_by_method_and_interval.csv` and Love plots: worst absolute SMD during grace; a single landmark assessment.
 - `ccw_weight_summary_and_ess_by_interval.csv` and `ccw_pooled_ess_by_interval.csv`: raw/clipped tails, counts above 10/20/50/100, top-1% weight mass, ESS and ESS/N in the exact risk sets.
@@ -112,3 +121,22 @@ Run the included synthetic integration check with `Rscript tests/test_pipeline.R
 ## Server crash workaround
 
 Script 01 uses single-threaded data.table operations and base-R ordering/patient runs for hospital-block assignment. This avoids the grouped `:=`/`forderv` code path that crashed on the server. Overlap handling, the six-hour gap rule, block IDs and component ordering are unchanged. Runtime R/data.table/Arrow versions are printed in the log. This workaround does not establish the underlying cause of the native-library crash; a matching server environment may still require package maintenance if another operation crashes.
+
+## Result directory layout
+
+```text
+results/run_<timestamp>_grace24h/
+  aggregate/
+    eda/                 # Script 05 summaries, figures and screening ranges
+    analysis/            # Script 07 five-method results and weight diagnostics
+  sensitive/
+    cohort/              # Script 01 cohort/crosswalk
+    source_profile/      # Script 02 source checks
+    steroid_candidates/  # Script 03
+    steroid_treatment/   # Script 04
+    eda_preparation/     # Script 05 prepared individual data and fill audit
+    analysis/            # Script 07 individual data, fits and weight trajectories
+  logs/
+```
+
+Script 07's fourth argument is now the **run root**, not an `analysis/` subfolder. It creates `aggregate/analysis` and `sensitive/analysis` itself. The run command file supplies this correctly. Use a fresh run to avoid mixing the old all-cause endpoint/results with the new composite endpoint. No old result files are automatically moved or deleted.

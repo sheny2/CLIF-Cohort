@@ -23,11 +23,11 @@ build_followup_timing <- function(cohort, administrations, cutoff, min_cell_n = 
   # Do not use the grace-limited treatment assignment or the first-ever dose:
   # a pre-time-zero dose must not hide a later qualifying administration.
   first <- a[, .(hours = if (length(hours)) min(hours) else NA_real_), by = hospital_block_id]
-  events <- rbindlist(list(data.table(event_type = rep("Death", nrow(death)), hours = death$hours),
+  events <- rbindlist(list(data.table(event_type = rep(PRIMARY_EVENT_LABEL, nrow(death)), hours = death$hours),
                           data.table(event_type = rep("First qualifying steroid administration", nrow(first)), hours = first$hours)))
   events[, interval := pmax(1L, as.integer(ceiling(hours / 6)))]
   counts <- events[, .(n = .N), by = .(event_type, interval)]
-  bins <- CJ(event_type = c("Death", "First qualifying steroid administration"), interval = 1:112)
+  bins <- CJ(event_type = c(PRIMARY_EVENT_LABEL, "First qualifying steroid administration"), interval = 1:112)
   bins <- merge(bins, counts, by = c("event_type", "interval"), all.x = TRUE)
   bins[is.na(n), n := 0L]
   bins[, `:=`(interval_start_hours = (interval - 1L) * 6,

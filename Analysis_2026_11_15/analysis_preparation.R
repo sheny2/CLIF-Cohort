@@ -59,7 +59,7 @@ to_interval <- function(hours) {
 
 # ---- Hospitalization, demographics, outcome, comorbidities ------------------
 
-message("Building baseline hospital-block cohort and 28-day mortality outcome...")
+message("Building baseline hospital-block cohort and 28-day in-hospital death/hospice outcome...")
 cohort <- as.data.table(read_parquet(cohort_path, as_data_frame = TRUE))
 required_cohort_columns <- c(
   "hospital_block_id", "patient_id", "admission_dttm", "discharge_dttm",
@@ -256,24 +256,9 @@ comorbidity_names <- c(
 )
 for (variable in comorbidity_names) setnafill(cohort, "const", 0, cols = variable)
 
-# Use patient death_dttm for 28-day death after respiratory-failure start,
-# including deaths after discharge. Fall back to an expired-discharge timestamp
-# only when death_dttm is absent. Administrative censoring uses the explicit
-# study data cutoff.
-cohort[, event_dttm := as.POSIXct(death_dttm, tz = "UTC")]
-cohort[
-  is.na(event_dttm) & tolower(discharge_category) == "expired",
-  event_dttm := as.POSIXct(discharge_dttm, tz = "UTC")
-]
-cohort[, event_hours := as.numeric(difftime(
-  event_dttm,
-  index_dttm,
-  units = "hours"
-))]
-cohort[
-  !is.finite(event_hours) | event_hours < 0,
-  `:=`(event_dttm = as.POSIXct(NA, tz = "UTC"), event_hours = NA_real_)
-]
+# The primary endpoint excludes deaths after the selected hospital block.
+cohort <- derive_primary_outcome(cohort,"index_dttm")
+write_outcome_definition(cohort,shareable_dir,data_cutoff_dttm)
 cohort[, censor_hours := as.numeric(difftime(
   data_cutoff_dttm, index_dttm, units = "hours"
 ))]
@@ -401,57 +386,57 @@ cohort[, A_tau := as.integer(S <= tau)]
 
 # Raw outcome counts. These are descriptive cohort quantities, not adjusted
 # causal estimates. In particular, treatment-group comparisons can be affected
-# by treatment-confounding and by deaths that occur before the grace period ends.
-deaths_within_grace <- cohort[
+# by treatment-confounding and by primary events that occur before the grace period ends.
+events_within_grace <- cohort[
   delta == 1L & is.finite(event_hours) & event_hours <= grace_hours,
   .N
 ]
-deaths_after_grace <- cohort[
+events_after_grace <- cohort[
   delta == 1L & is.finite(event_hours) & event_hours > grace_hours,
   .N
 ]
-deaths_28d <- cohort[delta == 1L, .N]
-cohort_mortality_summary <- data.table(
+events_28d <- cohort[delta == 1L, .N]
+cohort_outcome_summary <- data.table(
   measure = c(
     "final sampled cohort",
-    paste0("death within ", grace_hours, " hours of time zero"),
-    paste0("death after ", grace_hours, " hours through day ", horizon_days),
-    paste0("all deaths within ", horizon_days, " days"),
-    paste0("no observed death within ", horizon_days, " days")
+    paste0("primary event within ", grace_hours, " hours of time zero"),
+    paste0("primary event after ", grace_hours, " hours through day ", horizon_days),
+    paste0("all primary events within ", horizon_days, " days"),
+    paste0("no observed primary event within ", horizon_days, " days")
   ),
   n = c(
     nrow(cohort),
-    deaths_within_grace,
-    deaths_after_grace,
-    deaths_28d,
-    nrow(cohort) - deaths_28d
+    events_within_grace,
+    events_after_grace,
+    events_28d,
+    nrow(cohort) - events_28d
   )
 )
-cohort_mortality_summary[, percent_of_cohort := 100 * n / nrow(cohort)]
-write_shareable_csv(cohort_mortality_summary, "cohort_mortality_summary.csv")
+cohort_outcome_summary[, percent_of_cohort := 100 * n / nrow(cohort)]
+write_shareable_csv(cohort_outcome_summary, "cohort_outcome_summary.csv")
 
-mortality_by_observed_treatment <- cohort[
+outcome_by_observed_treatment <- cohort[
   ,
   .(
     hospital_blocks = .N,
-    deaths_within_grace = sum(
+    events_within_grace = sum(
       delta == 1L & is.finite(event_hours) & event_hours <= grace_hours
     ),
-    deaths_28d = sum(delta == 1L)
+    events_28d = sum(delta == 1L)
   ),
   by = .(glucocorticoid_within_grace = A_tau)
 ]
-mortality_by_observed_treatment[, `:=`(
-  deaths_within_grace_percent = 100 * deaths_within_grace / hospital_blocks,
-  deaths_28d_percent = 100 * deaths_28d / hospital_blocks,
+outcome_by_observed_treatment[, `:=`(
+  events_within_grace_percent = 100 * events_within_grace / hospital_blocks,
+  events_28d_percent = 100 * events_28d / hospital_blocks,
   interpretation = paste(
     "Descriptive only; observed treatment groups are not baseline randomized",
-    "groups and early death can prevent treatment initiation."
+    "groups and an early primary event can prevent treatment initiation."
   )
 )]
 write_shareable_csv(
-  mortality_by_observed_treatment,
-  "cohort_mortality_by_observed_grace_period_treatment.csv"
+  outcome_by_observed_treatment,
+  "cohort_outcome_by_observed_grace_period_treatment.csv"
 )
 
 # ---- Actual Hopkins hospitals as sites --------------------------------------
@@ -951,11 +936,8 @@ design <- list(
   treatment = "first qualifying systemic glucocorticoid administration",
   strategy_1 = "initiate qualifying glucocorticoid within the grace period",
   strategy_0 = "do not initiate qualifying glucocorticoid within the grace period; later initiation allowed",
-  outcome = "death within 28 days of respiratory-failure start",
-  alive_discharge = paste(
-    "not censoring; patient death_dttm provides 28-day follow-up and",
-    "discharge Expired is used only when death_dttm is absent"
-  ),
+  outcome = PRIMARY_OUTCOME,
+  alive_discharge = "Other alive discharge is event-free, not censoring; subsequent post-discharge death excluded",
   step_hours = step_hours,
   grace_hours = grace_hours,
   tau_intervals = tau,
@@ -987,5 +969,5 @@ design <- list(
   list(design=design, long=as.data.frame(long), cohort=cohort,
        baseline_covariates=baseline_covariates, time_varying_covariates=time_varying_covariates,
        tau=tau, M=M, step_hours=step_hours, horizon_days=horizon_days,
-       cohort_mortality_summary=cohort_mortality_summary)
+       cohort_outcome_summary=cohort_outcome_summary)
 }

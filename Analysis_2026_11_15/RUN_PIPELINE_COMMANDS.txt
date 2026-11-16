@@ -51,13 +51,13 @@ Rscript 05_cohort_summary_eda.R \
 # 07 has its own preparation and does not rely on a saved 05 cache.
 Rscript 07_prepare_and_run_five_methods.R \
  "$CLIF_DATA_DIR" "$COHORT_OUTPUT_DIR" "$STEROID_TREATMENT_DIR" \
- "$RUN_ROOT/analysis" "$CLIF_DATA_CUTOFF_DATE" \
+ "$RUN_ROOT" "$CLIF_DATA_CUTOFF_DATE" \
  2>&1 | tee "$RUN_ROOT/logs/07.log"
 
-# Main summaries: $RUN_ROOT/analysis/aggregate/five_method_results.csv
-# Weight diagnostics: $RUN_ROOT/analysis/aggregate/
+# Main summaries: $RUN_ROOT/aggregate/analysis/five_method_results.csv
+# Weight diagnostics: $RUN_ROOT/aggregate/analysis/
 # EDA including screening ranges: $SUMMARY_EDA_DIR/
-# Individual records: sensitive/ and analysis/sensitive/; retain on the data server.
+# Individual records: sensitive/; retain on the data server.
 # Aggregate counts/plots are unsuppressed, including cells below 10.
 # To try a different grace period, edit TREATMENT_GRACE_HOURS above and rerun.
 # The cohort/timing EDA continues to show both 24-hour and 96-hour comparisons.

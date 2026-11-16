@@ -32,11 +32,11 @@ script_dir <- if (length(script_file)) {
 data_dir <- if (length(args) >= 1L && nzchar(args[1L])) args[1L] else
   Sys.getenv("CLIF_DATA_DIR", unset = "")
 cohort_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
-  file.path(script_dir, "pipeline_output", "sensitive", "cohort")
+  file.path(script_dir, "results", "default", "sensitive", "cohort")
 treatment_dir <- if (length(args) >= 3L && nzchar(args[3L])) args[3L] else
-  file.path(script_dir, "pipeline_output", "sensitive", "steroid_treatment")
+  file.path(script_dir, "results", "default", "sensitive", "steroid_treatment")
 output_dir <- if (length(args) >= 4L && nzchar(args[4L])) args[4L] else
-  file.path(script_dir, "pipeline_output", "shareable", "cohort_summary_eda")
+  file.path(script_dir, "results", "default", "aggregate", "cohort_summary_eda")
 min_cell_n <- if (length(args) >= 5L && nzchar(args[5L])) {
   suppressWarnings(as.integer(args[5L]))
 } else suppressWarnings(as.integer(
@@ -169,28 +169,13 @@ if (file.exists(patient_path)) {
       patient[, death_dttm := safe_time(death_dttm)]
       death_source_available <- TRUE
     }
-    cohort <- merge(cohort, patient, by = "patient_id", all.x = TRUE, sort = FALSE)
+    new_patient_columns <- setdiff(names(patient),names(cohort))
+    cohort <- merge(cohort,patient[,c("patient_id",new_patient_columns),with=FALSE],by="patient_id",all.x=TRUE,sort=FALSE)
   }
 }
 
-# Derive follow-up and outcomes. Patient death_dttm is preferred; an Expired
-# discharge timestamp is used only when patient death_dttm is unavailable.
-cohort[, event_dttm := as.POSIXct(NA, tz = "UTC")]
-cohort[, event_source := NA_character_]
-if ("death_dttm" %in% names(cohort)) {
-  cohort[!is.na(death_dttm), `:=`(
-    event_dttm = death_dttm,
-    event_source = "patient death_dttm"
-  )]
-}
-if (all(c("discharge_category", "discharge_dttm") %in% names(cohort))) {
-  cohort[
-    is.na(event_dttm) & normalize_text(discharge_category) == "expired" &
-      !is.na(discharge_dttm),
-    `:=`(event_dttm = discharge_dttm,
-         event_source = "expired discharge fallback")
-  ]
-}
+source(file.path(script_dir,"outcome_helpers.R"))
+cohort <- derive_primary_outcome(cohort)
 
 # A fixed data cutoff is preferred. If it is not supplied, use the latest
 # observed admission, discharge, death, or treatment timestamp as a transparent
@@ -223,18 +208,17 @@ cohort[, complete_grace_followup := if (is.finite(grace_hours)) {
   as.integer(!is.na(data_cutoff_dttm) &
     respiratory_failure_start + grace_hours * 60 * 60 <= data_cutoff_dttm)
 } else NA_integer_]
-cohort[, death_within_28d := as.integer(
-  !is.na(event_hours) & event_hours >= 0 & event_hours <= 28 * 24
+cohort[, outcome_within_28d := as.integer(
+  !is.na(event_hours) & event_hours >= 0 & event_hours <= 28 * 24 & event_dttm <= data_cutoff_dttm
 )]
-cohort[, death_within_grace := if (is.finite(grace_hours)) {
-  as.integer(!is.na(event_hours) & event_hours >= 0 & event_hours <= grace_hours)
+cohort[, outcome_within_grace := if (is.finite(grace_hours)) {
+  as.integer(!is.na(event_hours) & event_hours >= 0 & event_hours <= grace_hours & event_dttm <= data_cutoff_dttm)
 } else NA_integer_]
-cohort[, in_hospital_death := as.integer(
-  !is.na(discharge_category) & normalize_text(discharge_category) == "expired"
-)]
-cohort[, hospice_discharge := as.integer(
-  !is.na(discharge_category) & grepl("hospice", normalize_text(discharge_category))
-)]
+cohort[, in_hospital_death := as.integer(!is.na(event_type)&event_type=="in_hospital_death" &
+  is.finite(event_hours)&event_hours>=0&event_hours<=672&event_dttm<=data_cutoff_dttm)]
+cohort[, hospice_discharge := as.integer(!is.na(event_type)&event_type=="hospice_discharge" &
+  is.finite(event_hours)&event_hours>=0&event_hours<=672&event_dttm<=data_cutoff_dttm)]
+write_outcome_definition(cohort,output_dir,data_cutoff_dttm)
 if (all(c("admission_dttm", "discharge_dttm") %in% names(cohort))) {
   cohort[, length_of_stay_days := as.numeric(difftime(
     discharge_dttm, admission_dttm, units = "days"
@@ -261,8 +245,8 @@ overall_summary <- data.table(
     "length_of_stay_median_days", "length_of_stay_q1_days",
     "length_of_stay_q3_days", "treated_within_grace_n",
     "treated_within_grace_percent", "treatment_grace_hours",
-    "death_within_grace_n", "death_within_grace_percent",
-    "death_within_28d_n", "death_within_28d_percent",
+    "outcome_within_grace_n", "outcome_within_grace_percent",
+    "outcome_within_28d_n", "outcome_within_28d_percent",
     "in_hospital_death_n", "in_hospital_death_percent",
     "hospice_discharge_n", "hospice_discharge_percent",
     "patient_death_dttm_available", "minimum_reportable_cell"
@@ -297,16 +281,16 @@ overall_summary <- data.table(
         cohort$complete_grace_followup == 1L
       ]) else NA,
     grace_hours,
-    if (is.finite(grace_hours)) sum(cohort$death_within_grace[
+    if (is.finite(grace_hours)) sum(cohort$outcome_within_grace[
       cohort$complete_grace_followup == 1L
     ]) else NA,
     if (is.finite(grace_hours) && sum(cohort$complete_grace_followup) > 0)
-      100 * mean(cohort$death_within_grace[
+      100 * mean(cohort$outcome_within_grace[
         cohort$complete_grace_followup == 1L
       ]) else NA,
-    sum(cohort$death_within_28d[cohort$complete_28d_followup == 1L]),
+    sum(cohort$outcome_within_28d[cohort$complete_28d_followup == 1L]),
     if (sum(cohort$complete_28d_followup) > 0) 100 * mean(
-      cohort$death_within_28d[cohort$complete_28d_followup == 1L]
+      cohort$outcome_within_28d[cohort$complete_28d_followup == 1L]
     ) else NA,
     sum(cohort$in_hospital_death), 100 * mean(cohort$in_hospital_death),
     sum(cohort$hospice_discharge), 100 * mean(cohort$hospice_discharge),
@@ -335,9 +319,9 @@ site_summary <- cohort[, .(
   n_grace_complete = sum(complete_grace_followup, na.rm = TRUE),
   n_28d_complete = sum(complete_28d_followup),
   treated = sum(treated_within_grace[complete_grace_followup == 1L], na.rm = TRUE),
-  death_grace = sum(death_within_grace[complete_grace_followup == 1L],
+  outcome_grace = sum(outcome_within_grace[complete_grace_followup == 1L],
                     na.rm = TRUE),
-  death_28d = sum(death_within_28d[complete_28d_followup == 1L]),
+  outcome_28d = sum(outcome_within_28d[complete_28d_followup == 1L]),
   in_hospital_death = sum(in_hospital_death),
   hospice = sum(hospice_discharge),
   age_median = median(age_at_admission, na.rm = TRUE),
@@ -351,10 +335,10 @@ site_summary[, `:=`(
   n_28d_complete_reportable = report_count(n_28d_complete),
   treated_reportable = report_count(treated),
   treated_percent = report_percent(treated, n_grace_complete),
-  death_within_grace_reportable = report_count(death_grace),
-  death_within_grace_percent = report_percent(death_grace, n_grace_complete),
-  death_28d_reportable = report_count(death_28d),
-  death_28d_percent = report_percent(death_28d, n_28d_complete),
+  outcome_within_grace_reportable = report_count(outcome_grace),
+  outcome_within_grace_percent = report_percent(outcome_grace, n_grace_complete),
+  outcome_28d_reportable = report_count(outcome_28d),
+  outcome_28d_percent = report_percent(outcome_28d, n_28d_complete),
   in_hospital_death_reportable = report_count(in_hospital_death),
   in_hospital_death_percent = report_percent(in_hospital_death, n),
   hospice_reportable = report_count(hospice),
@@ -364,7 +348,7 @@ site_summary[, `:=`(
   small_cell_threshold = min_cell_n
 )]
 site_summary[, c("n", "n_grace_complete", "n_28d_complete",
-                 "treated", "death_grace", "death_28d",
+                 "treated", "outcome_grace", "outcome_28d",
                  "in_hospital_death", "hospice") := NULL]
 setorder(site_summary, source_site_id)
 write_summary(site_summary, "cohort_by_site_suppressed.csv")
@@ -384,20 +368,20 @@ outcome_summary <- cohort[, .(
   n = .N,
   n_grace_complete = sum(complete_grace_followup, na.rm = TRUE),
   n_28d_complete = sum(complete_28d_followup),
-  death_grace = sum(death_within_grace[complete_grace_followup == 1L],
+  outcome_grace = sum(outcome_within_grace[complete_grace_followup == 1L],
                     na.rm = TRUE),
-  death_28d = sum(death_within_28d[complete_28d_followup == 1L]),
+  outcome_28d = sum(outcome_within_28d[complete_28d_followup == 1L]),
   in_hospital_death = sum(in_hospital_death),
   hospice = sum(hospice_discharge)
 ), by = treatment_group]
-mortality_plot <- outcome_summary[n_28d_complete > 0L, .(
-  treatment_group, death_28d_percent = 100 * death_28d / n_28d_complete
+outcome_plot <- outcome_summary[n_28d_complete > 0L, .(
+  treatment_group, outcome_28d_percent = 100 * outcome_28d / n_28d_complete
 )]
-for (event in c("death_grace", "death_28d", "in_hospital_death", "hospice")) {
+for (event in c("outcome_grace", "outcome_28d", "in_hospital_death", "hospice")) {
   outcome_summary[, paste0(event, "_reportable") := report_count(get(event))]
-  denominator_column <- if (event == "death_grace") {
+  denominator_column <- if (event == "outcome_grace") {
     "n_grace_complete"
-  } else if (event == "death_28d") {
+  } else if (event == "outcome_28d") {
     "n_28d_complete"
   } else "n"
   outcome_summary[, paste0(event, "_percent") := report_percent(
@@ -408,10 +392,10 @@ outcome_summary[, n_reportable := report_count(n)]
 outcome_summary[, n_grace_complete_reportable := report_count(n_grace_complete)]
 outcome_summary[, n_28d_complete_reportable := report_count(n_28d_complete)]
 outcome_summary[, c("n", "n_grace_complete", "n_28d_complete",
-                    "death_grace", "death_28d",
+                    "outcome_grace", "outcome_28d",
                     "in_hospital_death", "hospice") := NULL]
 outcome_summary[, small_cell_threshold := min_cell_n]
-write_summary(outcome_summary, "mortality_by_treatment_suppressed.csv")
+write_summary(outcome_summary, "outcome_by_treatment_suppressed.csv")
 
 continuous_candidates <- intersect(c(
   "age_at_admission", "length_of_stay_days", "hours_admission_to_time_zero",
@@ -552,11 +536,11 @@ quality_flags <- data.table(
   ),
   note = c(
     "Expected TRUE", "Expected TRUE", "Expected TRUE for Hopkins extract",
-    "If FALSE, 28-day mortality uses only Expired-discharge fallback",
+    "Death timestamps are used only within the selected hospital block; hospice/Expired discharge supplies endpoint timestamps",
     "Preferred; otherwise the latest observed timestamp is used",
-    "Denominator for crude 28-day mortality",
+    "Denominator for crude 28-day outcome",
     "Required for treated-within-grace assignment",
-    "Denominator for treatment assignment and grace-period mortality",
+    "Denominator for treatment assignment and grace-period outcome",
     "Expected 0", "Expected 0", "Expected 0",
     "Retained and flagged; report as an eligibility-data diagnostic",
     "Retained and flagged; report as an eligibility-data diagnostic"
@@ -628,8 +612,8 @@ qualifying_timing <- open_dataset(qualifying_path) |>
 timing_results <- build_followup_timing(
   cohort, qualifying_timing, data_cutoff_dttm, min_cell_n
 )
-write_summary(timing_results$intervals, "death_and_treatment_six_hour_counts.csv")
-write_summary(timing_results$grace_comparison, "death_and_treatment_grace_comparison.csv")
+write_summary(timing_results$intervals, "outcome_and_treatment_six_hour_counts.csv")
+write_summary(timing_results$grace_comparison, "outcome_and_treatment_grace_comparison.csv")
 # Plot exact counts even when the corresponding CSV uses small-cell suppression.
 timing_plot_results <- build_followup_timing(
   cohort, qualifying_timing, data_cutoff_dttm, min_cell_n = 1L
@@ -647,7 +631,7 @@ make_timing_plot <- function(x) {
     scale_x_continuous(breaks = sort(unique(c(seq(0, 672, by = 96), 24))),
                        limits = c(0, 672), expand = expansion(mult = c(0, 0))) +
     facet_wrap(~event_type, ncol = 1, scales = "free_y") +
-    labs(title = "Deaths and first qualifying steroid administration through day 28",
+    labs(title = "Primary outcome and first qualifying steroid administration through day 28",
          subtitle = "Six-hour bins; each patient counted once per panel",
          x = "Hours since respiratory-failure time zero (672 hours = 28 days)",
          y = "Patients per six-hour interval",
@@ -656,13 +640,13 @@ make_timing_plot <- function(x) {
                          "patients receiving steroids before time zero may be continuing treatment.")) +
     theme(legend.position = "bottom")
 }
-ggsave(file.path(output_dir, "plot_death_and_treatment_timing.png"),
+ggsave(file.path(output_dir, "plot_outcome_and_treatment_timing.png"),
        make_timing_plot(timing_plot), width = 12, height = 8, dpi = 300)
 ggsave(file.path(output_dir, "plot_treatment_timing.png"),
-       make_timing_plot(timing_plot[event_type != "Death"]),
+       make_timing_plot(timing_plot[event_type != PRIMARY_EVENT_LABEL]),
        width = 12, height = 5.5, dpi = 300)
-ggsave(file.path(output_dir, "plot_death_timing.png"),
-       make_timing_plot(timing_plot[event_type == "Death"]),
+ggsave(file.path(output_dir, "plot_outcome_timing.png"),
+       make_timing_plot(timing_plot[event_type == PRIMARY_EVENT_LABEL]),
        width = 12, height = 5.5, dpi = 300)
 
 grace_plot <- copy(timing_plot_results$grace_comparison)
@@ -673,23 +657,23 @@ p <- ggplot(grace_plot, aes(grace_window, n_reportable, fill = grace_window)) +
   geom_text(aes(label = n_reportable), vjust = -0.3) +
   facet_wrap(~event_type, scales = "free_y") +
   scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
-  labs(title = "Observed deaths and steroid administration by grace-period end",
+  labs(title = "Observed primary events and steroid administration by grace-period end",
        subtitle = "Cumulative counts at 24 and 96 hours in the same cohort",
        x = "Grace period", y = "Patients",
        caption = "Observed through the configured data cutoff; not adjusted rates or treatment effects.")
 ggsave(file.path(output_dir, "plot_grace_period_comparison.png"), p,
        width = 11, height = 5.5, dpi = 300)
 
-if (nrow(mortality_plot)) {
-  p <- ggplot(mortality_plot,
-              aes(treatment_group, death_28d_percent, fill = treatment_group)) +
+if (nrow(outcome_plot)) {
+  p <- ggplot(outcome_plot,
+              aes(treatment_group, outcome_28d_percent, fill = treatment_group)) +
     geom_col(show.legend = FALSE) +
-    geom_text(aes(label = sprintf("%.1f%%", death_28d_percent)), vjust = -0.35) +
-    expand_limits(y = max(mortality_plot$death_28d_percent) * 1.14) +
-    labs(title = "Observed 28-day mortality by treatment assignment",
-         x = NULL, y = "Mortality (%)") +
+    geom_text(aes(label = sprintf("%.1f%%", outcome_28d_percent)), vjust = -0.35) +
+    expand_limits(y = max(outcome_plot$outcome_28d_percent) * 1.14) +
+    labs(title = "Observed in-hospital death or hospice discharge by day 28",
+         x = NULL, y = "In-hospital death or hospice discharge (%)") +
     theme(axis.text.x = element_text(angle = 15, hjust = 1))
-  ggsave(file.path(output_dir, "plot_mortality_by_treatment.png"), p,
+  ggsave(file.path(output_dir, "plot_outcome_by_treatment.png"), p,
          width = 8.5, height = 5.5, dpi = 300)
 }
 
@@ -714,8 +698,8 @@ if (treatment_group_available) {
       " of ", sum(cohort$complete_grace_followup),
       " with complete grace-period follow-up\n", sep = "")
 }
-cat("Observed deaths within 28 days: ",
-    sum(cohort$death_within_28d[cohort$complete_28d_followup == 1L]),
+cat("Observed in-hospital death/hospice events within 28 days: ",
+    sum(cohort$outcome_within_28d[cohort$complete_28d_followup == 1L]),
     " of ", sum(cohort$complete_28d_followup),
     " with complete 28-day follow-up\n", sep = "")
 cat("Patient-level inputs were not exported.\n")
