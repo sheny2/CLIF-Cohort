@@ -127,7 +127,7 @@ plot_data<-function(x,labelcol)rbindlist(list(
  x[,.(method=get(labelcol),estimand="28-day restricted mean event-free time difference (days)",estimate=rmst_difference_days,lower=rmst_difference_lower_days,upper=rmst_difference_upper_days)]))
 forest<-function(z,levels,title,filename) {
  z[,method:=factor(method,levels=rev(levels))]
- z[,meta_result:=grepl("meta-analysis",as.character(method))]
+ z[,meta_result:=grepl("meta-analysis|^Overall CCW MA",as.character(method))]
  p<-ggplot(z,aes(estimate,method,color=meta_result,shape=meta_result))+
   geom_vline(xintercept=0,linetype=3,color="grey50")+
   geom_errorbar(aes(xmin=lower,xmax=upper),orientation="y",width=.18,na.rm=TRUE)+geom_point(size=2.7,na.rm=TRUE)+
@@ -139,17 +139,28 @@ forest<-function(z,levels,title,filename) {
  ggsave(file.path(out,filename),p,width=12,height=9,dpi=200)
 }
 forest(plot_data(six,"method"),six$method,"Six-method treatment-effect comparison","six_method_effect_comparison.png")
-# Site forest includes both pooling choices, with eligibility/exclusions in CSV.
+# Each site's estimate, with the primary overall CCW MA as the bottom row.
+# Fixed-effect sensitivity estimates remain in the meta-analysis CSV.
 site_plot<-copy(site_results)[,method:=ifelse(site_valid,site,paste0(site," (excluded from pooling)"))]
-for(kind in c("REML_HK","fixed_effect")) {
- row<-copy(extra);row[,method:=if(kind=="REML_HK")"Pooled random-effects meta-analysis" else "Pooled fixed-effect meta-analysis"]
- for(e in c("risk_difference","rmst_difference_days")) {
-  z<-meta$summary[estimand==e&meta_method==kind]
-  for(j in c(1,3,4))set(row,j=map[[e]][j],value=z[[c("estimate","lower","upper")[match(j,c(1,3,4))]]])
- }
- site_plot<-rbindlist(list(site_plot,row),fill=TRUE)
-}
-forest(plot_data(site_plot,"method"),site_plot$method,"Local CCW estimates and meta-analysis","local_ccw_site_forest.png")
+overall<-copy(extra);overall[,method:="Overall CCW MA (random-effects)"]
+site_plot<-rbindlist(list(site_plot,overall),fill=TRUE)
+site_forest_data<-plot_data(site_plot,"method")
+write(site_forest_data,"local_ccw_site_forest_data.csv")
+forest(site_forest_data,site_plot$method,"Site-specific CCW estimates and overall meta-analysis","local_ccw_site_forest.png")
+site_rr<-site_plot[,.(method,risk_ratio,risk_ratio_lower,risk_ratio_upper)]
+write(site_rr,"local_ccw_site_risk_ratio_forest_data.csv")
+site_rr[,overall:=grepl("^Overall CCW MA",method)]
+site_rr[,method:=factor(method,levels=rev(site_plot$method))]
+p<-ggplot(site_rr,aes(risk_ratio,method,color=overall,shape=overall))+
+ geom_vline(xintercept=1,linetype=3,color="grey50")+
+ geom_errorbar(aes(xmin=risk_ratio_lower,xmax=risk_ratio_upper),orientation="y",width=.18,na.rm=TRUE)+
+ geom_point(size=2.8,na.rm=TRUE)+scale_x_log10()+
+ scale_color_manual(values=c("FALSE"="#2878A5","TRUE"="#9B3675"),guide="none")+
+ scale_shape_manual(values=c("FALSE"=16,"TRUE"=18),guide="none")+
+ labs(title="Site-specific CCW risk ratios and overall meta-analysis",subtitle=PRIMARY_OUTCOME,
+ x="Risk ratio (log scale), 95% CI",y=NULL,
+ caption="Overall CCW MA: REML random effects with Hartung–Knapp 95% CI.")+theme_minimal(base_size=11)
+ggsave(file.path(out,"local_ccw_site_risk_ratio_forest.png"),p,width=12,height=6,dpi=200)
 rr<-six[,.(method,risk_ratio,risk_ratio_lower,risk_ratio_upper)]
 rr[,method:=factor(method,levels=rev(six$method))]
 p<-ggplot(rr,aes(risk_ratio,method))+geom_vline(xintercept=1,linetype=3)+

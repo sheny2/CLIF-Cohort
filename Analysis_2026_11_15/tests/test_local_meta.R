@@ -45,5 +45,8 @@ if(length(a)) {
  weights<-fread(file.path(out,"meta_analysis_site_weights_and_exclusions.csv"))
  sums<-weights[included==TRUE & is.finite(weight_percent),sum(weight_percent),by=.(estimand,meta_method)]
  stopifnot(all(abs(sums$V1-100)<1e-8),file.exists(file.path(out,"six_method_effect_comparison.png")))
- cat("PASS: local weighted outcome curves, six-method output, meta-analysis weights, and unchanged 07 results.\n")
+ site_forest<-fread(file.path(out,"local_ccw_site_forest_data.csv"))
+ stopifnot(all(grepl("^Overall CCW MA",site_forest[,tail(method,1),by=estimand]$V1)),
+  nrow(site_forest)==12L,file.exists(file.path(out,"local_ccw_site_risk_ratio_forest.png")))
+ cat("PASS: local weighted curves, six-method output, site forests with overall CCW MA last, and unchanged 07 results.\n")
 }

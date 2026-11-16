@@ -163,7 +163,8 @@ New outputs, all separate from the running 07:
 | `aggregate/local_ccw_meta/six_method_results.csv` | Original five methods plus the primary random-effects meta-analysis row |
 | `aggregate/local_ccw_meta/six_method_effect_comparison.png` | Six-method forest for RD and restricted mean event-free time difference |
 | `aggregate/local_ccw_meta/six_method_risk_ratio_forest.png` | Six-method RR forest |
-| `aggregate/local_ccw_meta/local_ccw_site_forest.png` | Site effects plus random- and fixed-effect meta-analysis |
+| `aggregate/local_ccw_meta/local_ccw_site_forest.png` | Each site’s RD and event-free time difference; overall random-effects CCW MA at the bottom |
+| `aggregate/local_ccw_meta/local_ccw_site_risk_ratio_forest.png` | Each site’s RR; overall random-effects CCW MA at the bottom |
 | `sensitive/local_ccw_meta/local_ccw_meta_fits.rds` | Patient-level clone weights, local fits and meta-analysis objects; keep on server |
 
 The original five-method CSV and figures are never overwritten. The sixth row pools **contrasts**, not separate arm risks; arm-specific pooled risk/RMST fields are therefore intentionally blank. Each contrast uses its own inverse-variance weights. This step introduces no Cox regression.
