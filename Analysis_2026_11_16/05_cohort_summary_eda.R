@@ -28,6 +28,7 @@ script_dir <- if (length(script_file)) {
   dirname(normalizePath(gsub("~+~", " ", sub("^--file=", "", script_file[1L]),
                              fixed = TRUE)))
 } else normalizePath(getwd())
+source(file.path(script_dir, "site_helpers.R"))
 
 data_dir <- if (length(args) >= 1L && nzchar(args[1L])) args[1L] else
   Sys.getenv("CLIF_DATA_DIR", unset = "")
@@ -97,6 +98,7 @@ write_summary <- function(x, filename) {
 
 message("Reading cohort and treatment assignment on HPC...")
 cohort <- as.data.table(read_parquet(cohort_path))
+assert_mapped_sites(cohort$source_site_id)
 treatment <- as.data.table(read_parquet(treatment_path))
 required_cohort <- c("patient_id", "hospital_block_id", "respiratory_failure_start")
 missing_cohort <- setdiff(required_cohort, names(cohort))

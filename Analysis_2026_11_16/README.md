@@ -1,8 +1,68 @@
 # CLIF analysis — November 16, 2026
 
-This fresh standalone copy retains scripts 01–08, the five-method analysis and local CCW/meta-analysis. The previous Analysis_2026_11_15 and its baseline-S/F sensitivity remain unchanged. No NCO or calibration analysis is included.
+This standalone copy retains scripts 01–08, the five-method analysis and local CCW/meta-analysis. Optional script 09 diagnoses prior-year hospitalization associations; optional script 10 constructs a historical NCO panel and explores NN/MNN calibration. The previous Analysis_2026_11_15 and its baseline-S/F sensitivity remain unchanged.
+
+## Optional historical NCO calibration (10)
+
+Run after updated 07 and 09, using the same RUN_ROOT, expanded history, and
+optional history-coverage start date:
+
+```bash
+Rscript 10_historical_nco_calibration.R "$RUN_ROOT" \
+  /projects/emulate_icu/rclif_2_1/clif_hospitalization.parquet
+# Add YYYY-MM-DD as argument 3 only if a system history-coverage start is known.
+```
+
+Chad has replaced that table with expanded encounters. Script 10 constructs
+any admission, >=2 admissions, a stay >=7 days, ED-origin admission, and
+SNF/rehab discharge in the year preceding index block admission. Historical
+category fields are optional; missing fields/uncertain categories remain
+unknown, never automatic negatives. Inspect the source-category mapping audit.
+ICU history is not inferred without historical ADT.
+
+Results live in `aggregate/nco_calibration/`; individual histories and model
+objects stay in `sensitive/nco_calibration/`. Main files:
+
+- `nco_calibration_inputs.csv`: final-grace-interval clipped-weight historical
+  log prevalence ratios, SEs, counts, and inclusion/exclusion reasons.
+- `nn_mnn_fit_diagnostics.csv` and `nn_mnn_bias_distributions.png`: NN/MNN
+  parameters and fitted systematic-error densities; nonconverged MNN never
+  silently becomes NN.
+- `nco_patient_level_correlations.csv`, `nco_mnn_membership.csv`, and
+  `leave_one_control_out.csv`: overlap, model membership, and stability checks.
+- `exploratory_calibrated_ccw_rr.csv` and `exploratory_ccw_rr_forest.png`:
+  primary CCW logRR minus fitted majority-component mean, exponentiated to RR.
+
+`NCO_MIN_CELL_N` defaults to 10 observed positive and 10 negative patients in
+each arm. Exact duplicate patient-level controls are excluded. NN requires
+three usable controls; small-panel exploratory MNN requires four. These are
+computational guards, not evidence that the panel is scientifically sufficient.
+The controls are overlapping utilization measures, not independent draws.
+
+**All calibration is an assumption-dependent sensitivity analysis.** Historical
+prevalence contrasts in selected adherence/survival risk sets can reflect
+selection as well as confounding. Transport to day-28 mortality log-RR bias,
+and invariance of bias with true effect size, are not established. Consequently
+`calibration_supported` remains FALSE. The majority component is designated
+valid by assumption, not by proximity to zero or clinical validation.
+Plug-in intervals combine primary sampling variance with between-NCO bias
+dispersion, omitting calibration-parameter uncertainty, shared-patient
+dependence, fitted-weight uncertainty, and transport uncertainty. No formal
+calibrated p-values, RD or RMST correction are produced. No 07/08/09 results
+are overwritten. Coverage is explicitly unverified if argument 3 is absent.
+
+Synthetic checks: `Rscript tests/test_nco_calibration.R`; optional integration
+argument is a synthetic `tests/test_pipeline.R` result folder, never real data.
 
 ## Changes in this version
+
+Unmapped-site hospital blocks (including `hopkins_unspecified`, blank/missing IDs,
+and unknown/unmapped/unspecified placeholder labels) are excluded in script 01,
+after site resolution and before selecting one block per patient. Attrition
+includes this exclusion. They do not enter analysis, site tables, or plots.
+Scripts 05, 07, 08, and 09 reject stale inputs that still contain these labels.
+After updating, run 01--08 in a fresh RUN_ROOT; rerun optional 09 afterward.
+The previously downloaded 4,482-patient estimates have not been recomputed.
 
 Chad's inclusive screening bounds replace the earlier bounds:
 

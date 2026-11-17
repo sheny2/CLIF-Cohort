@@ -14,6 +14,7 @@ source(file.path(root,"sf_pairing_helpers.R"))
 source(file.path(root,"outcome_helpers.R"))
 source(file.path(root,"analysis_eda_helpers.R"))
 source(file.path(root,"analysis_preparation.R"))
+source(file.path(root,"site_helpers.R"))
 source(file.path(root,"weight_diagnostics.R"))
 arg <- function(i,default) if(length(a)>=i && nzchar(a[i])) a[i] else default
 data_dir <- arg(1,Sys.getenv("CLIF_DATA_DIR","/projects/emulate_icu/rclif_2_1"))

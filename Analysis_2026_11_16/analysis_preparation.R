@@ -61,6 +61,7 @@ to_interval <- function(hours) {
 
 message("Building baseline hospital-block cohort and 28-day in-hospital death/hospice outcome...")
 cohort <- as.data.table(read_parquet(cohort_path, as_data_frame = TRUE))
+assert_mapped_sites(cohort$source_site_id)
 required_cohort_columns <- c(
   "hospital_block_id", "patient_id", "admission_dttm", "discharge_dttm",
   "age_at_admission", "respiratory_failure_start",

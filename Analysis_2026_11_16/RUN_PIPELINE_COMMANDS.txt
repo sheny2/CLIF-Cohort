@@ -17,6 +17,8 @@ export CLIF_SITE_ID=hopkins_unspecified
 export SUMMARY_SMALL_CELL_THRESHOLD=1
 
 # A fresh result directory for every run, entirely inside this dated folder.
+# Rerun from 01 after the unmapped-site exclusion update. Do not reuse older
+# cohort/analysis outputs: 05/07/08/09 reject unmapped-site records in old inputs.
 export RUN_ROOT="$PWD/results/run_$(date +%Y%m%d_%H%M%S)_grace${TREATMENT_GRACE_HOURS}h"
 export COHORT_OUTPUT_DIR="$RUN_ROOT/sensitive/cohort"
 export GLUCOCORTICOID_CHECK_DIR="$RUN_ROOT/sensitive/source_profile"
@@ -78,4 +80,9 @@ if [[ -n "${EXPANDED_HOSPITALIZATION_PATH:-}" ]]; then
  fi
  Rscript 09_prior_hospitalization_nco_diagnostic.R "${NCO_ARGS[@]}" \
   2>&1 | tee "$RUN_ROOT/logs/09.log"
+ # 10: historical NCO panel and exploratory NN/MNN log-RR/RR calibration.
+ # Chad replaced this source table with expanded history:
+ # export EXPANDED_HOSPITALIZATION_PATH=/projects/emulate_icu/rclif_2_1/clif_hospitalization.parquet
+ Rscript 10_historical_nco_calibration.R "${NCO_ARGS[@]}" \
+  2>&1 | tee "$RUN_ROOT/logs/10.log"
 fi

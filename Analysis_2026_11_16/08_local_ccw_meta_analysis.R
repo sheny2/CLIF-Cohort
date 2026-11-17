@@ -9,7 +9,7 @@ data.table::setDTthreads(1L)
 a<-commandArgs(TRUE)
 f<-sub("^--file=","",grep("^--file=",commandArgs(FALSE),value=TRUE)[1])
 root<-dirname(normalizePath(gsub("~+~"," ",f,fixed=TRUE)))
-for(helper in c("06_generalized_five_methods.R","variable_rules.R","sf_pairing_helpers.R","outcome_helpers.R","local_meta_helpers.R"))source(file.path(root,helper))
+for(helper in c("06_generalized_five_methods.R","variable_rules.R","sf_pairing_helpers.R","outcome_helpers.R","local_meta_helpers.R","site_helpers.R"))source(file.path(root,helper))
 run_root<-if(length(a)&&nzchar(a[1]))a[1] else Sys.getenv("RUN_ROOT","")
 if(!nzchar(run_root)||!dir.exists(run_root))stop("Supply the existing RUN_ROOT from a completed 07 run")
 input<-file.path(run_root,"sensitive","analysis");original<-file.path(run_root,"aggregate","analysis")
@@ -28,6 +28,7 @@ write<-function(x,f) {
  fwrite(x,file.path(out,f),na="")
 }
 long<-as.data.table(read_parquet(file.path(input,"pneumonia_ccw_long.parquet")))
+assert_mapped_sites(long$site)
 if(any(long[,uniqueN(site),by=hospital_block_id]$V1!=1L))stop("Hospital block assigned to more than one site")
 results<-fits<-term_lists<-processing<-diagnostics<-curves<-weight_checks<-list();all_warnings<-character()
 for(s in sort(unique(long$site))) {
@@ -176,7 +177,7 @@ writeLines(c("08 fits weights AND weighted event-free outcome curves within each
  "Site effects/SEs are pooled: RD and event-free time on original scales, RR/OR on log scales.",
  "Primary pooling: REML random effects with Hartung-Knapp 95% t intervals; fixed-effect inverse-variance pooling is supplementary.",
  "No continuity correction is added for zero-risk ratio contrasts; invalid/nonpositive variances are excluded per estimand with reasons.",
- "Nonconverged local nuisance fits and unsupported clone risk sets are excluded from pooling; their point estimates remain visible for review.",
+ "Unmapped-site records are excluded during cohort construction; stale prepared inputs containing them must be rebuilt. Nonconverged local nuisance fits and unsupported clone risk sets are excluded from pooling; their point estimates remain visible for review.",
  "At least two valid sites are required; no fallback pooled result is fabricated if REML fails.",
  "The meta-analysis targets an average site effect and need not equal the participant-pooled CCW effect.",
  "With five sites, heterogeneity and prediction intervals are imprecise. Causal interpretation still requires exchangeability and positivity.",

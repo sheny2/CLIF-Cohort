@@ -56,6 +56,7 @@ if (length(script_file_argument)) {
 source(file.path(script_dir, "pneumonia_icd_helpers.R"))
 source(file.path(script_dir, "variable_rules.R"))
 source(file.path(script_dir, "hospital_block_helpers.R"))
+source(file.path(script_dir, "site_helpers.R"))
 
 args <- commandArgs(trailingOnly = TRUE)
 data_dir <- if (length(args) >= 1L && nzchar(args[1L])) args[1L] else
@@ -1062,6 +1063,11 @@ if (deferred_adt_site_assignment && nrow(eligible_blocks)) {
   invisible(gc(verbose = FALSE))
 }
 
+mapped_site <- is_mapped_site(eligible_blocks$source_site_id)
+message("Excluding ", sum(!mapped_site), " eligible hospital block(s) with unmapped site")
+eligible_blocks <- eligible_blocks[mapped_site]
+if (!nrow(eligible_blocks)) stop("No eligible hospital blocks with mapped site remain.")
+assert_mapped_sites(eligible_blocks$source_site_id)
 eligible_blocks[, eligible_blocks_for_patient := .N, by = patient_id]
 setorder(eligible_blocks, patient_id, admission_dttm, hospital_block_id)
 set.seed(selection_seed)
@@ -1166,6 +1172,8 @@ attrition <- rbindlist(list(
   cbind(data.table(step = paste0("Blocks without lactate >=",
                                  lactate_exclusion_threshold, " mmol/L")),
         count_blocks(no_high_lactate_blocks)),
+  cbind(data.table(step = "Eligible blocks with mapped hospital site"),
+        count_blocks(eligible_blocks$hospital_block_id)),
   cbind(data.table(step = "Final cohort: one randomly selected eligible block per patient"),
         count_blocks(cohort$hospital_block_id))
 ), use.names = TRUE, fill = TRUE)
