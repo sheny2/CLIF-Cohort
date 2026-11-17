@@ -300,36 +300,6 @@ not evidence of an adequate panel. `NCO_MIN_CELL_N` defaults to 10 positive and
 10 negative observations in each arm. Failed MNN fits are reported, not replaced
 with NN under the MNN label.
 
-## Items requiring review
-
-- **Grace-period boundaries:** 06 currently uses `tau - 1` as the early-clone
-  censoring threshold for noninitiators. Event handling in the final grace
-  interval, including deaths before the deadline, needs an explicit timing audit.
-- **CPAP eligibility:** CPAP is grouped with NIPPV in covariates but does not
-  independently qualify a patient in 01. Acute versus chronic CPAP needs review.
-- **Temporal covariates:** adjacent future fills and the symmetric HFNO
-  eligibility window are implemented choices, not strictly prospective rules.
-- **Endpoint ascertainment:** transfers and post-discharge deaths warrant review
-  when comparing this endpoint with an all-cause mortality trial.
-- **Inference:** fitted weights are treated as fixed. With five sites, estimated
-  heterogeneity is imprecise; standard Hartung–Knapp intervals can be unusually
-  narrow when site estimates are very similar.
-
-The `given`-only treatment correction and corrected NCO log-ratio SEs are in the
-current code. Outputs generated before these corrections must be regenerated;
-changing source files does not update existing results. Use a fresh run folder
-for a full rerun rather than mixing outputs from different code versions.
-
-## Software checks
-
-Tests use synthetic data, not the EHR cohort. Useful entry points:
-
-```bash
-Rscript tests/test_steroid_actions.R     # 02–04, timing, actions, dose/route units
-Rscript tests/test_pipeline.R            # full preparation and 24/96-hour methods
-Rscript tests/test_primary_nco.R         # history boundaries and clone covariance
-Rscript tests/test_nco_calibration.R     # NCO panel, log-ratio SEs, NN/MNN
-```
 
 Other tests cover hospital blocks, outcomes, adjacent filling, S/F pairing, and
 local meta-analysis. Some accept a completed synthetic run for integration
