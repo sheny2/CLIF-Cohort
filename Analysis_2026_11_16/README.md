@@ -1,188 +1,336 @@
-# CLIF analysis — November 16, 2026
+# CLIF pneumonia and glucocorticoid analysis
 
-This standalone copy retains scripts 01–08, the five-method analysis and local CCW/meta-analysis. Optional script 09 diagnoses prior-year hospitalization associations; optional script 10 constructs a historical NCO panel and explores NN/MNN calibration. The previous Analysis_2026_11_15 and its baseline-S/F sensitivity remain unchanged.
+This folder contains a standalone analysis of early systemic glucocorticoid
+initiation in adults with pneumonia and respiratory failure. It builds the
+cohort from CLIF tables, prepares longitudinal covariates, estimates treatment
+contrasts, and produces diagnostic summaries. Historical negative-control
+outcome (NCO) analyses are optional.
 
-## Optional historical NCO calibration (10)
+**Start here:** review the study definitions below, then scripts **01 and 04**
+for cohort and treatment construction. For methods, read **07 and 08** together
+with the helpers they source. Use `RUN_PIPELINE_COMMANDS.txt` to run the pipeline.
+No scripts from the parent folder are required.
 
-Run after updated 07 and 09, using the same RUN_ROOT, expanded history, and
-optional history-coverage start date:
+## Study question and definitions
+
+| Item | Current implementation |
+|---|---|
+| Comparison | Initiation within the grace period versus no initiation within that period; comparator patients may initiate later |
+| Grace period | 24 hours by default |
+| Time zero | Qualifying respiratory-support initiation in the selected hospitalization block |
+| Follow-up | Up to 28 days, represented in six-hour intervals |
+| Primary outcome | In-hospital death or hospice discharge by day 28 in the selected block |
+| Unit | One randomly selected eligible hospitalization block per patient |
+| Sites | Hospital IDs resolved from source records; unmapped-site blocks are excluded |
+
+A **hospitalization block is not a six-hour stay**. Overlapping encounters and
+encounters separated by no more than six hours are merged into an episode that
+can last days or weeks. Six hours is also the analysis-interval length; these
+are separate concepts. Multiple eligible episodes are reduced to one per
+patient using the configured selection seed.
+
+### Cohort eligibility: 01
+
+The principal criteria are:
+
+- Age at admission at least 18 and below 120 years.
+- ED-origin admission (`admission_type_category = ed`).
+- Qualifying ICD-10-CM pneumonia present on admission, in any diagnosis
+  position (`poa_any`): J12–J18, including J17. Influenza and the separately
+  specified excluded pneumonia codes do not qualify; see `pneumonia_icd_helpers.R`.
+- IMV or NIPPV initiation, or HFNO initiation with S/F <315 and FiO2 >0.50,
+  within the first seven days of the block. HFNO qualification requires
+  SpO2 ≤97%; there is no minimum future support-duration requirement.
+- No recorded death before time zero and no qualifying DNR/DNI-equivalent status.
+- No concurrent shock proxy under the implemented rules: norepinephrine or
+  epinephrine on NIPPV/HFNO; dose >0.25 mcg/kg/min on IMV; any vasopressin;
+  or lactate ≥4 mmol/L. Pressor and lactate lookbacks are six hours.
+
+Review `adult_pneumonia_attrition.csv` and `adult_pneumonia_cohort_design.csv`
+for the actual run. Unmapped-site exclusion occurs before selecting one block
+per patient. Older inputs containing unmapped sites are rejected downstream.
+
+### Treatment definition: 03–04
+
+Source: `clif_medication_admin_intermittent.parquet`, with `med_group = steroid`.
+03 extracts IV/enteral candidates; 04 applies the following thresholds **per
+administration**, not per day:
+
+| Drug | Minimum dose | Eligible routes |
+|---|---:|---|
+| Dexamethasone | 6 mg | IV or enteral |
+| Hydrocortisone | 50 mg | IV |
+| Prednisone | 40 mg | Enteral |
+| Methylprednisolone | 32 mg | IV or enteral |
+| Prednisolone | 40 mg | IV or enteral |
+
+**Only `mar_action_category = given` can establish treatment.** `not_given`
+and unknown actions are excluded. Other drugs/routes and unsupported dose
+units, including `mg/kg/dose`, do not qualify. 04 writes reasons for exclusion
+and an administration-action audit. Source-wide medication counts are
+administration rows, not treated-patient counts.
+
+### Outcome and discharge handling
+
+`outcome_helpers.R` defines the endpoint consistently for the analyses:
+
+- Death timestamp within the selected hospitalization block; an expired
+  discharge supplies a fallback timestamp when needed.
+- Hospice discharge at its discharge timestamp.
+- The earliest qualifying component determines the event.
+- Other alive discharges, including transfers, are not primary events and are
+  not censoring at discharge; they remain event-free through day 28 unless
+  administratively censored.
+- Post-discharge death timestamps are excluded from this endpoint.
+
+Thus the endpoint differs from 28-day all-cause mortality. Administrative
+censoring uses the configured data cutoff. See `outcome_ascertainment_audit.csv`
+and `natural_censoring_counts.csv` for run-specific counts.
+
+## Run on the data server
+
+Required R packages: `arrow`, `data.table`, `dplyr`, `ggplot2`, `survival`;
+`metafor` is required for 08.
 
 ```bash
-Rscript 10_historical_nco_calibration.R "$RUN_ROOT" \
-  /projects/emulate_icu/rclif_2_1/clif_hospitalization.parquet
-# Add YYYY-MM-DD as argument 3 only if a system history-coverage start is known.
+cd /projects/emulate_icu/CLIF-Cohort/Analysis_2026_11_16
+bash RUN_PIPELINE_COMMANDS.txt
 ```
 
-Chad has replaced that table with expanded encounters. Script 10 constructs
-any admission, >=2 admissions, a stay >=7 days, ED-origin admission, and
-SNF/rehab discharge in the year preceding index block admission. Historical
-category fields are optional; missing fields/uncertain categories remain
-unknown, never automatic negatives. Inspect the source-category mapping audit.
-ICU history is not inferred without historical ADT.
+Before launching, review the exports in that command file:
 
-Results live in `aggregate/nco_calibration/`; individual histories and model
-objects stay in `sensitive/nco_calibration/`. Main files:
+| Setting | Command-file value |
+|---|---|
+| `CLIF_DATA_DIR` | `/projects/emulate_icu/rclif_2_1` via a relative-path calculation |
+| `TREATMENT_GRACE_HOURS` | `24` |
+| `CLIF_DATA_CUTOFF_DATE` | `2026-10-31` |
+| `HOSPITAL_BLOCK_GAP_HOURS` | `6` |
+| `COHORT_SELECTION_SEED` | `2026` |
+| `PNEUMONIA_CASE_DEFINITION` | `poa_any` |
+| `SUMMARY_SMALL_CELL_THRESHOLD` | `1` |
 
-- `nco_calibration_inputs.csv`: final-grace-interval clipped-weight historical
-  log prevalence ratios, SEs, counts, and inclusion/exclusion reasons.
-- `nn_mnn_fit_diagnostics.csv` and `nn_mnn_bias_distributions.png`: NN/MNN
-  parameters and fitted systematic-error densities; nonconverged MNN never
-  silently becomes NN.
-- `nco_patient_level_correlations.csv`, `nco_mnn_membership.csv`, and
-  `leave_one_control_out.csv`: overlap, model membership, and stability checks.
-- `exploratory_calibrated_ccw_rr.csv` and `exploratory_ccw_rr_forest.png`:
-  primary CCW logRR minus fitted majority-component mean, exponentiated to RR.
+Edit the command-file grace-period export to try another window; accepted
+windows are multiples of six hours below 28 days. The timing EDA separately
+compares 24 and 96 hours. The command file creates a fresh `RUN_ROOT` for each
+run and stops on a failed command. Invoking it with `bash` does not preserve
+its newly assigned `RUN_ROOT` in your parent terminal.
 
-`NCO_MIN_CELL_N` defaults to 10 observed positive and 10 negative patients in
-each arm. Exact duplicate patient-level controls are excluded. NN requires
-three usable controls; small-panel exploratory MNN requires four. These are
-computational guards, not evidence that the panel is scientifically sufficient.
-The controls are overlapping utilization measures, not independent draws.
+Chad replaced `/projects/emulate_icu/rclif_2_1/clif_hospitalization.parquet`
+with expanded encounters before and after potential index encounters. This is
+the current source. Other historical clinical tables have not necessarily been
+expanded, and complete historical capture must not be assumed.
 
-**All calibration is an assumption-dependent sensitivity analysis.** Historical
-prevalence contrasts in selected adherence/survival risk sets can reflect
-selection as well as confounding. Transport to day-28 mortality log-RR bias,
-and invariance of bias with true effect size, are not established. Consequently
-`calibration_supported` remains FALSE. The majority component is designated
-valid by assumption, not by proximity to zero or clinical validation.
-Plug-in intervals combine primary sampling variance with between-NCO bias
-dispersion, omitting calibration-parameter uncertainty, shared-patient
-dependence, fitted-weight uncertainty, and transport uncertainty. No formal
-calibrated p-values, RD or RMST correction are produced. No 07/08/09 results
-are overwritten. Coverage is explicitly unverified if argument 3 is absent.
+## Script guide
 
-Synthetic checks: `Rscript tests/test_nco_calibration.R`; optional integration
-argument is a synthetic `tests/test_pipeline.R` result folder, never real data.
+| Script | Purpose | Main output under the run folder |
+|---|---|---|
+| 01 | Construct eligible blocks, select one per patient, retain encounter crosswalks | `sensitive/cohort/` |
+| 02 | Check steroid labels, drugs, routes, units, and administration actions | `sensitive/source_profile/` |
+| 03 | Extract candidate steroid rows linked to the cohort | `sensitive/steroid_candidates/` |
+| 04 | Apply treatment rules and determine treatment timing | `sensitive/steroid_treatment/` |
+| 05 | Cohort EDA, treatment/event timing, support trajectories, covariate availability | `aggregate/eda/` |
+| 06 | Shared method library; sourced automatically, not a separate pipeline command | Used by 07–10 |
+| 07 | Prepare analysis data and run five methods with balance/weight diagnostics | `aggregate/analysis/` |
+| 08 | Fit CCW independently within each site, then meta-analyze site contrasts | `aggregate/local_ccw_meta/` |
+| 09, optional | Diagnose any prior-year hospitalization as a historical NCO | `aggregate/nco_prior_hospitalization/` |
+| 10, optional | Build a historical NCO panel and explore NN/MNN bias calibration | `aggregate/nco_calibration/` |
 
-## Changes in this version
+07 reports federated CCW, pooled site-stratified CCW, landmark IPW, IPCW without
+cloning, and unweighted per-protocol estimates. Outputs include risk differences,
+risk ratios, odds ratios, and restricted mean event-free time differences.
+Initiation/adherence weights freeze after grace; natural-censoring weights can
+continue when applicable. Weight truncation uses the 1st/99th percentiles.
+Landmark analysis conditions on reaching the end of grace without an event.
 
-Script 02 is a targeted intermittent-medication source check. It accepts only
-the confirmed `steroid` group label, reports observed group
-labels and counts, and summarizes routes and drug/route/dose-unit combinations.
-Broad vocabulary discovery across all medication tables is no longer repeated.
-The command arguments are unchanged; 03/04 do not depend on 02's profile CSVs.
-Treatment eligibility remains defined by 03/04, including drug-specific doses
-and routes in 04. Source-profile row counts are not treated-patient counts. The server source
-check confirmed `med_group = steroid` with 204,291 administration rows; scripts
-02--04 no longer accept the plural group label.
+08 adds local CCW plus REML random-effects meta-analysis with Hartung–Knapp
+intervals. Fixed-effect results are supplementary. It writes site forest plots
+and comparisons of all six methods. Pooled site contrasts need not equal the
+participant-pooled estimate. Influence-function variances treat fitted nuisance
+models as fixed; the main analyses do not bootstrap or fit Cox outcome models.
 
-03 filters the confirmed `iv`/`enteral` routes and retains administration
-actions for auditing. 04 requires `mar_action_category = given`; `not_given`
-and unknown actions cannot establish treatment initiation. See
-`steroid_administration_action_counts.csv` in 02 and
-`steroid_administration_action_audit.csv` in 04. Drug/dose/route thresholds
-are unchanged, and weight-based doses remain excluded. Rerun 02--10 after
-this update using a fresh run with the existing 01 cohort outputs copied in,
-or rerun the full pipeline in a fresh run. Old estimates have not been updated.
-CPAP remains grouped with NIPPV for covariates but does not independently
-qualify eligibility in 01; resolving acute versus chronic CPAP requires review.
+## Covariates and measurement processing
 
-Unmapped-site hospital blocks (including `hopkins_unspecified`, blank/missing IDs,
-and unknown/unmapped/unspecified placeholder labels) are excluded in script 01,
-after site resolution and before selecting one block per patient. Attrition
-includes this exclusion. They do not enter analysis, site tables, or plots.
-Scripts 05, 07, 08, and 09 reject stale inputs that still contain these labels.
-After updating, run 01--08 in a fresh RUN_ROOT; rerun optional 09 afterward.
-The previously downloaded 4,482-patient estimates have not been recomputed.
+`analysis_preparation.R` builds the analysis inputs. Baseline candidates include
+age, sex, initial support/location, admission year/season, and coded
+comorbidities. Time-varying candidates include temperature, WBC, glucose,
+albumin, a non-respiratory SOFA proxy, categorical support, and categorical S/F.
+The initiation denominator includes current and lagged time-varying terms.
+Arterial pH and PaCO2 are excluded. Constant or unavailable terms can be removed;
+**`ipcw_model_specification.csv` lists the exact terms used in each run.**
 
-Chad's inclusive screening bounds replace the earlier bounds:
+### Screening
+
+`variable_rules.R` contains the inclusive screening ranges:
 
 | Variable | Range |
 |---|---|
-| Temperature | 30–45 C |
-| SpO2 | 70–100%; S/F additionally requires <=97% |
+| Temperature | 30–45 °C |
+| SpO2 | 70–100%; S/F additionally requires ≤97% |
+| FiO2 | 0.21–1; documented percentage values are converted to fractions |
+| S/F | 70–462 |
 | MAP | 0–250 mmHg |
-| WBC | 0–500 x10^3/uL |
-| Serum glucose | 0–2000 mg/dL |
+| WBC | 0–500 ×10³/µL |
+| Glucose | 0–2000 mg/dL |
 | Albumin | 0–15 g/dL |
-| Platelets | 0–2000 x10^3/uL |
+| Platelets | 0–2000 ×10³/µL |
 | Total bilirubin | 0–80 mg/dL |
 | Creatinine | 0–30 mg/dL |
 | GCS | 3–15 |
-| FiO2 | 0.21–1; documented percent form normalized |
-| S/F | 70–462, with SpO2 <=97% |
 
-`variable_rules.R` is the source of these rules. Outside-range values become missing before temporal selection; source records are never overwritten. Zeros explicitly permitted by these ranges are retained. **No additional percentile winsorization** is performed in 07 or local 08. WBC/glucose retain log1p transformations. HFNO's plausibility lower bound changes from SpO2 80% to 70%, so the eligible cohort and time zero can change; rerun 01–04.
+Outside-range measurements become missing before temporal selection; a patient
+is not removed solely for one invalid measurement. Permitted zeros are retained.
+There is no additional percentile winsorization of covariates. WBC and glucose
+use log(1 + value) transformations.
 
-For other modeled measurement inputs (excluding SpO2/FiO2/SF), first retain the latest valid prior reading within the original lookback (12h vitals/support/FiO2; 24h WBC/glucose/GCS; 48h albumin/platelets/bilirubin/creatinine). For remaining inpatient gaps, use the nearest valid same-block measurement in either direction, with ties favoring earlier readings. No maximum fallback distance is imposed. Source measurements must fall between block admission and discharge, no later than the primary event or administrative cutoff. New adjacent fills are not made after discharge. No measurement from a different patient/block is borrowed.
+### Missingness and temporal selection
 
-**Future/post-treatment readings can supply these adjacent fills.** This implements the requested exploratory filling rule and is not a strictly prospective covariate definition. Read `adjacent_fill_audit_<variable>.csv`: counts, future-fill counts, distances, fills >24h and remaining gaps. Detailed gap/fill rows are sensitive. A block with no valid reading remains missing; numeric model gaps receive a median plus a missingness indicator. Respiratory support uses its explicit Unknown category. SOFA remains a five-component non-respiratory proxy and is missing when any component is unavailable after component filling.
+For non-S/F inputs, use a prior value within the variable-specific lookback,
+then the nearest valid measurement in the same block to fill remaining inpatient
+gaps. Ties favor earlier records; the fallback has no maximum distance. Source
+records must be within the block and no later than the primary event or data
+cutoff. **This can use future/post-treatment measurements.** Remaining numeric
+gaps receive median imputation and missingness indicators. Support has an
+Unknown category. The non-respiratory SOFA proxy requires all five components
+and is not the complete SOFA score.
 
-S/F now uses strict chronological measurement pairing, not adjacent future fills. At each valid SpO2 timestamp, FiO2 is carried forward for at most four hours within the same continuous documented device episode. Device labels are forward-filled only. A nonblank device change starts a new episode, including a return to a previous device. Blank device rows inherit the last documented device; unknown initial device is not backfilled. At a simultaneous timestamp, the most intensive mapped device wins and FiO2 is taken only from that device (or a blank-device row if no device is specified at that timestamp).
+Respiratory support is represented as room air, conventional oxygen, HFNO,
+NIPPV/CPAP, IMV, or Unknown, rather than an ordinal support score.
 
-At each six-hour decision time use the latest prior SpO2 observation no more than four hours old, and its already paired FiO2. A device change after that SpO2 invalidates the pair. SpO2 >97% remains undefined, rather than selecting an older lower reading. The FiO2 four-hour age is measured at SpO2 time; the SpO2 four-hour recency is a separate rule at decision time. Thus FiO2 can be older than four hours at the final decision if SpO2 itself has been carried forward. All timestamps are retained for audit. The existing script-01 HFNO cohort eligibility remains separate: it uses the original symmetric +/-4-hour clinical qualification window. This covariate update does not redefine time zero or require simultaneous SpO2 at HFNO initiation. Thus the no-future rule here governs IPCW covariates, not the unchanged cohort-eligibility window. A fully prospective redesign of HFNO eligibility would require a separately agreed time-zero definition.
+### S/F pairing
 
-The IPCW model uses S/F as a nominal categorical factor represented by separate indicators: **Undefined; >300 (reference); (250,300]; (200,250]; (120,200]; <=120**. Identifiers are not entered as an ordinal numeric score. No continuous S/F model, median S/F imputation, or separate sf_ratio_missing term is used; Undefined is its own indicator. Current and lagged category indicators enter initiation models. These are SOFA-2-inspired S/F bands, not the complete SOFA-2 respiratory score, which has additional support/ECMO rules.
+For analysis covariates, pair SpO2 with prior FiO2 documented within four hours
+on the same continuous device episode. Device labels are forward-filled only;
+a device change starts a new episode. At each decision time, use the latest
+prior SpO2 no more than four hours old; an intervening device change invalidates
+the pair. SpO2 >97% remains Undefined, rather than being capped or replaced with
+an older lower saturation. FiO2 age is checked at SpO2 time, and SpO2 age is
+checked separately at decision time.
 
-Coverage outputs distinguish `sf_measurement_pairing_coverage.csv` (time/device pairing and eligible measured S/F), `sf_baseline_coverage.csv`, `sf_decision_time_coverage.csv`, and `sf_any_first_day_coverage.csv` (patients with any eligible first-day value, not a baseline confounder). `sf_measurement_pairs.parquet` in sensitive stores individual timestamps/episodes. Other variables retain the adjacent-fill rule and applicable missingness indicators; arterial pH and PaCO2 remain excluded.
+S/F categories are Undefined, >300 (reference), (250,300], (200,250],
+(120,200], and ≤120, entered as separate indicators with their lags. S/F is not
+median-imputed. The **01 HFNO eligibility window is separate**: it uses a
+symmetric ±4-hour clinical qualification window, which can include later values.
 
-## Unchanged design
-
-- Default grace: 24 hours; six-hour intervals; initiation within grace versus later/never initiation.
-- Outcome: in-hospital death or hospice discharge by day 28 in the selected block. Other alive discharge is not censoring, and subsequent post-discharge deaths are excluded.
-- Original age, ED admission, POA pneumonia, support-initiation and shock exclusions; block construction and one selected block per patient are retained.
-- Categorical support: room air, conventional oxygen, HFNO, NIPPV/CPAP, IMV and unknown.
-- 07 fits the same five methods with balance/weight/ESS diagnostics. Initiation weights freeze after grace; later initiation remains allowed in controls.
-- 08 fits local CCW and pools contrasts by REML/Hartung–Knapp, also reporting fixed-effect results and site/six-method forests. Standard HK can give unusually narrow intervals when site estimates are very similar; inference is unchanged from the previous version.
-- Influence-function uncertainty treats fitted nuisance models as fixed. There is no Cox model or NCO step.
-
-## Run
-
-Required packages: arrow, data.table, dplyr, ggplot2, survival, metafor.
-
-```bash
-bash /projects/emulate_icu/CLIF-Cohort/Analysis_2026_11_16/RUN_PIPELINE_COMMANDS.txt
-```
-
-Check the server `cd`, raw data path and administrative cutoff in the command file first. It defaults to `/projects/emulate_icu/rclif_2_1` and 2026-10-31. It runs 01–05, 07 and 08; 06 is sourced automatically. Each run gets its own directory:
+## Where to find results
 
 ```text
 results/run_<timestamp>_grace24h/
-  aggregate/eda/
-  aggregate/analysis/
-  aggregate/local_ccw_meta/
-  sensitive/cohort/
-  sensitive/source_profile/
-  sensitive/steroid_candidates/
-  sensitive/steroid_treatment/
-  sensitive/eda_preparation/
-  sensitive/analysis/
-  sensitive/local_ccw_meta/
-  logs/
+  aggregate/
+    eda/
+    analysis/
+    local_ccw_meta/
+    nco_prior_hospitalization/   # optional
+    nco_calibration/            # optional
+  sensitive/                   # patient-level inputs, histories, fits, and audits
+  logs/                        # one log per executed script
 ```
 
-Do not substitute the expanded history hospitalization table for the original index-encounter input without reviewing its effect on cohort/block construction. This version does not use the expanded table for history/NCOs; keep the intended index-cohort source files in the configured data directory.
+| Review question | Files to inspect |
+|---|---|
+| Who entered the cohort? | `sensitive/cohort/adult_pneumonia_attrition.csv` and `adult_pneumonia_cohort_design.csv`; EDA also exports cohort summaries |
+| Which administrations counted? | `sensitive/steroid_treatment/steroid_dose_route_rules.csv`, `steroid_administration_action_audit.csv`, and row-level eligibility parquet |
+| What were the treatment estimates? | `aggregate/analysis/five_method_results.csv`; `aggregate/local_ccw_meta/six_method_results.csv` |
+| Which confounders were fitted? | `aggregate/analysis/ipcw_model_specification.csv` |
+| Where is balance poor? | `covariate_balance_by_method_and_interval.csv` and love-plot data in `aggregate/analysis/` |
+| Were weights extreme? | Weight summaries, clipping fractions, ESS, and fit diagnostics in `aggregate/analysis/` |
+| How much information was filled or missing? | `model_relevant_missingness.csv`, `adjacent_fill_audit_*.csv`, and `sf_*coverage.csv` in `aggregate/analysis/` |
+| What happened within individual sites? | `aggregate/local_ccw_meta/local_ccw_site_results.csv` and `meta_analysis_results.csv` |
 
-Key files include screening_ranges.csv, raw_measurement_screening_counts.csv, adjacent_fill_audit_*.csv, model_relevant_missingness.csv, ipcw_model_specification.csv, five_method_results.csv, and six_method_results.csv. EDA/figures are unsuppressed; patient-level files remain in sensitive directories.
+Aggregate figures/counts are unsuppressed by default, including cells below 10.
+Patient-level files belong in `sensitive/` and should remain on the data server.
+Review output contents before sharing; an aggregate folder name is not an
+independent disclosure review. Sample sizes and estimates are run-specific and
+are not hardcoded in this README.
 
-Synthetic checks: `Rscript tests/test_pipeline.R` and `Rscript tests/test_local_meta.R /path/to/synthetic/run`. They do not run on the actual EHR data.
+## Optional historical NCO analyses
 
-## 09 — Primary historical NCO diagnostic
-
-After 07 completes, run:
+To run 09 and 10 on an existing completed run:
 
 ```bash
+cd /projects/emulate_icu/CLIF-Cohort/Analysis_2026_11_16
+export RUN_ROOT="$PWD/results/REPLACE_WITH_COMPLETED_RUN_FOLDER"
+export EXPANDED_HOSPITALIZATION_PATH=/projects/emulate_icu/rclif_2_1/clif_hospitalization.parquet
+mkdir -p "$RUN_ROOT/logs"
+set -euo pipefail
+
 Rscript 09_prior_hospitalization_nco_diagnostic.R \
-  "/path/to/completed/run" \
-  "/path/to/expanded_clif_hospitalization.parquet"
+  "$RUN_ROOT" "$EXPANDED_HOSPITALIZATION_PATH" 2>&1 | tee "$RUN_ROOT/logs/09.log"
+Rscript 10_historical_nco_calibration.R \
+  "$RUN_ROOT" "$EXPANDED_HOSPITALIZATION_PATH" 2>&1 | tee "$RUN_ROOT/logs/10.log"
 ```
 
-An optional third argument gives a verified **system-level** history coverage start (`YYYY-MM-DD`). With that argument, diagnostic contrasts exclude patients whose entire 365-day lookback is not covered. Without it, zeros mean no observed prior within-system admission; complete history coverage is explicitly unverified. Do not use each patient's first encounter as the coverage-start date or require a previous admission to establish eligibility. Do not pass the original filtered index-only table as though it were expanded history.
+Both accept an optional third argument: a verified **system-level** history
+coverage-start date (`YYYY-MM-DD`). Without it, historical capture is explicitly
+unverified. Do not use a patient's first observed encounter as that date.
+To include 09/10 automatically in a full pipeline run, export
+`EXPANDED_HOSPITALIZATION_PATH` before launching the command file; optionally
+export `HISTORY_COVERAGE_START_DATE` if known.
 
-The single NCO is **any distinct within-system hospital episode starting in the 365 days before index hospital-block admission**. The end of the window is index admission, not respiratory-failure time zero, so the current admission's pre-time-zero days cannot count as prior utilization. Encounters are deduplicated and overlap/<=6-hour transfer chains merged. Expanded episodes containing any selected index encounter are excluded, including connected prior transfer components. Only completed prior episodes count; potentially historical records with invalid dates make an otherwise negative NCO unknown. These records are reported rather than silently coded zero. Future admissions do not count. This definition counts hospitalizations represented by the delivered table; verify that it represents the intended admissions rather than an unfiltered mixture including outpatient/ED-only visits.
+09 measures any completed within-system episode starting in the 365 days before
+index block admission. It merges connected encounters, excludes the entire
+index-connected episode, and flags uncertain dates. It reuses saved 07 weights
+and clone risk sets to compare historical prevalence during grace, plus
+observed-group and landmark comparisons. It does not replace the primary
+survival outcome or refit the clinical analysis.
 
-**This is not a replacement 28-day survival outcome.** The hospitalization already occurred before follow-up. 09 reuses the exact saved 07 clone risk sets, raw/clipped IPCW and confounder setup, then compares the historical binary NCO's weighted prevalence across the strategy-specific risk sets during grace. It also reports unweighted full-cohort observed-group comparisons and a saved-weight landmark comparison. The NCO is not included in the weight model. No weights or primary outcome estimates are refitted or calibrated.
+10 adds recurrent admissions (≥2), stays ≥7 days, ED-origin admissions, and
+SNF/rehab discharges. Missing historical category fields remain unknown; ICU
+history is not inferred without historical location data. It fits NN
+(Normal–Normal) and MNN (mixture Normal–Normal) systematic-error models to
+final-grace-interval clipped-weight log prevalence ratios. MNN designates the
+majority component as valid by assumption, not by proximity to zero.
 
-CCW comparisons condition on evolving adherence/survival risk sets; the landmark comparison conditions on survival through grace. An imbalance can therefore reflect **selection as well as residual confounding**. These contrasts are diagnostics, not a formal causal NCO effect with a guaranteed zero null under every selection mechanism. Initial identical clones have equal baseline NCOs by construction, so initial equality is not validation. CIs combine both clones' contributions at the original-patient level, treating estimated weights as fixed. No bootstrap, multiple-NCO model or bias calibration is included.
+Main outputs in `aggregate/nco_calibration/` are:
 
-Outputs:
+- `nco_calibration_inputs.csv`: estimates, corrected log-ratio SEs, and exclusions.
+- `nn_mnn_fit_diagnostics.csv`, `nn_mnn_bias_distributions.png`: fits and densities.
+- `nco_patient_level_correlations.csv`, `nco_mnn_membership.csv`,
+  `leave_one_control_out.csv`: overlap, membership, and stability checks.
+- `exploratory_calibrated_ccw_rr.csv`: primary log RR minus the fitted bias mean,
+  exponentiated to RR, with plug-in sensitivity intervals.
 
-- `aggregate/nco_prior_hospitalization/primary_nco_summary.csv`: pooled descriptive/last-grace-interval/landmark contrasts.
-- `primary_nco_weighted_contrasts.csv`: site and pooled contrasts over grace, both raw/clipped weights, arm prevalences, prevalence differences and ESS.
-- `primary_nco_ccw_diagnostic.png`: diagnostic differences over grace.
-- `nco_availability_by_site.csv`, `historical_source_audit.csv`, `METHOD_NOTES.txt`: history availability/coverage and interpretation.
-- `sensitive/nco_prior_hospitalization/`: the patient NCO and qualifying historical episode audit.
+**Calibration is exploratory.** These controls are correlated utilization
+measures, and risk-set selection can generate associations without residual
+confounding. Transfer to mortality bias is unverified; `calibration_supported`
+therefore remains FALSE. Intervals omit calibration-parameter uncertainty,
+shared-patient dependence, nuisance-model uncertainty, and transport uncertainty.
+There is no formal calibrated p-value or RD/RMST correction. NN needs at least
+three usable controls and exploratory MNN four; these are computational guards,
+not evidence of an adequate panel. `NCO_MIN_CELL_N` defaults to 10 positive and
+10 negative observations in each arm. Failed MNN fits are reported, not replaced
+with NN under the MNN label.
 
-The existing 07/08 results remain unchanged. You can run 09 alone on a completed run. For optional execution after the complete command file, set `EXPANDED_HOSPITALIZATION_PATH` and, if known, `HISTORY_COVERAGE_START_DATE` before launching that file.
+## Items requiring review
 
-Software check: `Rscript tests/test_primary_nco.R` for boundary/coverage/clone-covariance tests. Add a synthetic completed run path for integration testing.
+- **Grace-period boundaries:** 06 currently uses `tau - 1` as the early-clone
+  censoring threshold for noninitiators. Event handling in the final grace
+  interval, including deaths before the deadline, needs an explicit timing audit.
+- **CPAP eligibility:** CPAP is grouped with NIPPV in covariates but does not
+  independently qualify a patient in 01. Acute versus chronic CPAP needs review.
+- **Temporal covariates:** adjacent future fills and the symmetric HFNO
+  eligibility window are implemented choices, not strictly prospective rules.
+- **Endpoint ascertainment:** transfers and post-discharge deaths warrant review
+  when comparing this endpoint with an all-cause mortality trial.
+- **Inference:** fitted weights are treated as fixed. With five sites, estimated
+  heterogeneity is imprecise; standard Hartung–Knapp intervals can be unusually
+  narrow when site estimates are very similar.
+
+The `given`-only treatment correction and corrected NCO log-ratio SEs are in the
+current code. Outputs generated before these corrections must be regenerated;
+changing source files does not update existing results. Use a fresh run folder
+for a full rerun rather than mixing outputs from different code versions.
+
+## Software checks
+
+Tests use synthetic data, not the EHR cohort. Useful entry points:
+
+```bash
+Rscript tests/test_steroid_actions.R     # 02–04, timing, actions, dose/route units
+Rscript tests/test_pipeline.R            # full preparation and 24/96-hour methods
+Rscript tests/test_primary_nco.R         # history boundaries and clone covariance
+Rscript tests/test_nco_calibration.R     # NCO panel, log-ratio SEs, NN/MNN
+```
+
+Other tests cover hospital blocks, outcomes, adjacent filling, S/F pairing, and
+local meta-analysis. Some accept a completed synthetic run for integration
+checks; read their usage comments before supplying an argument.
