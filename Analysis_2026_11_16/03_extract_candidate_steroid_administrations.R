@@ -1,9 +1,9 @@
 #!/usr/bin/env Rscript
 
 # Extract candidate systemic glucocorticoid administrations for the final CLIF
-# pneumonia cohort using the source fields confirmed by the Hopkins team:
+# pneumonia cohort 
 #   clif_medication_admin_intermittent
-#   med_group in c("steroid", "steroids")
+#   med_group in "steroid"
 #   med_route_category in c("enteral", "iv")
 #   admin_dttm is the administration time
 #
@@ -32,7 +32,7 @@ if (!nzchar(data_dir) || !dir.exists(data_dir)) {
 script_args <- commandArgs(trailingOnly = FALSE)
 script_file <- grep("^--file=", script_args, value = TRUE)
 script_dir <- if (length(script_file)) {
-  dirname(normalizePath(sub("^--file=", "", script_file[1L])))
+  dirname(normalizePath(gsub("~+~", " ", sub("^--file=", "", script_file[1L]), fixed = TRUE)))
 } else normalizePath(getwd())
 cohort_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
   file.path(script_dir, "results", "default", "sensitive", "cohort")
@@ -57,7 +57,8 @@ if (any(!file.exists(required_paths))) {
 dataset <- open_dataset(medication_path)
 available <- dataset$schema$names
 required_columns <- c(
-  "hospitalization_id", "med_group", "admin_dttm", "med_route_category"
+  "hospitalization_id", "med_group", "admin_dttm", "med_route_category",
+  "med_category", "med_dose", "med_dose_unit", "mar_action_category"
 )
 missing_columns <- setdiff(required_columns, available)
 if (length(missing_columns)) {
@@ -65,37 +66,8 @@ if (length(missing_columns)) {
        paste(missing_columns, collapse = ", "), call. = FALSE)
 }
 
-# Discover exact stored capitalization before applying Arrow filters.
-group_values <- dataset |>
-  select(med_group) |>
-  distinct() |>
-  collect() |>
-  as.data.table()
-steroid_group_values <- as.character(group_values$med_group)[
-  tolower(trimws(as.character(group_values$med_group))) %in%
-    c("steroid", "steroids")
-]
-route_values <- dataset |>
-  select(med_route_category) |>
-  distinct() |>
-  collect() |>
-  as.data.table()
-eligible_route_values <- as.character(route_values$med_route_category)[
-  tolower(trimws(as.character(route_values$med_route_category))) %in%
-    c("enteral", "iv")
-]
-if (!length(steroid_group_values)) {
-  stop("No med_group value equal to 'steroid' or 'steroids' was found.",
-       call. = FALSE)
-}
-if (!length(eligible_route_values)) {
-  stop("No enteral or iv med_route_category value was found.", call. = FALSE)
-}
-
 optional_columns <- c(
-  "med_category", "med_name", "medication_name", "med_dose",
-  "med_dose_unit", "med_amount", "med_amount_unit", "mar_action_category",
-  "mar_action_name", "order_dttm", "recorded_dttm", "start_dttm", "end_dttm"
+  "med_order_id", "med_name", "med_route_name", "mar_action_name", "mar_action_group"
 )
 selected_columns <- unique(c(required_columns,
                              intersect(optional_columns, available)))
@@ -119,9 +91,9 @@ cohort_hospitalization_ids <- unique(crosswalk$hospitalization_id[
 # cohort are collected into memory; source-wide attrition counts are aggregated
 # by Arrow first.
 steroid_query <- dataset |>
-  filter(.data$med_group %in% steroid_group_values)
+  filter(.data$med_group == "steroid")
 route_query <- steroid_query |>
-  filter(.data$med_route_category %in% eligible_route_values)
+  filter(.data$med_route_category %in% c("enteral", "iv"))
 valid_time_query <- route_query |>
   filter(!is.na(.data$admin_dttm))
 
@@ -143,6 +115,7 @@ query_counts <- function(query) {
   )
 }
 all_counts <- query_counts(steroid_query)
+if (all_counts[["n_rows"]] == 0L) stop("No med_group 'steroid' found; review source mapping.")
 route_counts <- query_counts(route_query)
 valid_time_counts <- query_counts(valid_time_query)
 
@@ -188,7 +161,7 @@ setorder(candidate, patient_id, hospital_block_id, admin_dttm)
 
 audit <- data.table(
   step = c(
-    "All intermittent rows with med_group in {steroid, steroids}",
+    "All intermittent rows with med_group == steroid",
     "Steroid rows with enteral or iv route",
     "Route-eligible steroid rows with nonmissing admin_dttm",
     "Candidate administrations linked to final cohort"
@@ -213,7 +186,7 @@ definition <- data.table(
     "dose_route_definition", "treatment_classification"
   ),
   value = c(
-    "clif_medication_admin_intermittent", "steroid;steroids", "enteral;iv",
+    "clif_medication_admin_intermittent", "steroid", "enteral;iv",
     "admin_dttm", "See 04_define_steroid_treatment.R", "NOT YET PERFORMED"
   )
 )

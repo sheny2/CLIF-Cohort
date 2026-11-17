@@ -1,23 +1,21 @@
 #!/usr/bin/env Rscript
 
-# Build an ED-admitted adult pneumonia respiratory-failure cohort from Hopkins
-# EHR data represented in CLIF format.
+# Build an ED-admitted adult pneumonia respiratory-failure cohort from Hopkins EHR data represented in CLIF format.
 #
-# Analytic unit: one randomly selected eligible six-hour hospital block per
-# patient. Component hospitalization IDs remain available through a crosswalk.
+# Analytic unit: One randomly selected eligible hospitalization block per patient, 
+# with encounters merged when separated by no more than six hours.
 #
-# Default inclusion criteria:
+# Inclusion criteria:
 #   1. valid completed hospital block; age >=18 and <120 years
 #   2. admission_type_category == "ed" for the first component encounter
-#   3. ICD-10-CM J12.*, J13-J17.*, or J18.* present on admission, in any
-#      diagnosis position
+#   3. ICD-10-CM J12.*, J13-J17.*, or J18.* present on admission
 #   4. time zero at initiation of IMV or NIPPV, or initiation of HFNO with
-#      S/F <315 with SpO2 <=97% while FiO2 >0.50; no future support-duration requirement
+#      S/F <315 with SpO2 <=97% while FiO2 >0.50
 #   5. no DNR/DNI-equivalent code status at time zero
 #   6. no concurrent shock proxy at time zero: any norepinephrine/epinephrine
 #      on NIPPV/HFNO, norepinephrine/epinephrine >0.25 mcg/kg/min on IMV,
 #      any vasopressin, or lactate >=4 mmol/L
-#   7. no recorded death before time zero
+
 #
 # Usage:
 #   Rscript 01_build_adult_pneumonia_cohort.R \
@@ -35,7 +33,7 @@ suppressPackageStartupMessages({
   library(dplyr)
 })
 
-# Native data.table grouping crashed on the server; use one thread explicitly.
+
 data.table::setDTthreads(1L)
 message("Runtime: R ", getRversion(), "; data.table ", packageVersion("data.table"),
         "; Arrow ", packageVersion("arrow"), "; data.table threads=", getDTthreads())
@@ -74,17 +72,18 @@ output_dir <- if (length(args) >= 2L && nzchar(args[2L])) args[2L] else
   file.path(script_dir, "results", "default", "sensitive", "cohort")
 
 case_definition <- if (length(args) >= 3L && nzchar(args[3L])) args[3L] else
-  Sys.getenv("PNEUMONIA_CASE_DEFINITION", unset = "poa_any")
+  Sys.getenv("PNEUMONIA_CASE_DEFINITION", unset = "poa_any") 
 case_definition <- tolower(trimws(case_definition))
 if (!case_definition %in% c("poa_any", "poa")) {
   stop(
     "CASE_DEFINITION must be 'poa_any'. The older expanded/principal/any ",
-    "definitions are retired for this analysis.",
+    "definitions used for sensitivity analysis before",
     call. = FALSE
   )
 }
-case_definition <- "poa_any"
+case_definition <- "poa_any" # any pneumonia diagnosis present on admission
 
+# some checks
 block_gap_hours <- if (length(args) >= 4L && nzchar(args[4L])) {
   suppressWarnings(as.numeric(args[4L]))
 } else {
@@ -93,7 +92,7 @@ block_gap_hours <- if (length(args) >= 4L && nzchar(args[4L])) {
 selection_seed <- if (length(args) >= 5L && nzchar(args[5L])) {
   suppressWarnings(as.integer(args[5L]))
 } else {
-  suppressWarnings(as.integer(Sys.getenv("COHORT_SELECTION_SEED", unset = "32284")))
+  suppressWarnings(as.integer(Sys.getenv("COHORT_SELECTION_SEED", unset = "2026")))
 }
 if (!is.finite(block_gap_hours) || block_gap_hours < 0) {
   stop("BLOCK_GAP_HOURS must be nonnegative.", call. = FALSE)
@@ -114,6 +113,7 @@ requested_site_column <- if (length(args) >= 7L && nzchar(args[7L])) {
 } else Sys.getenv("CLIF_SITE_COLUMN", unset = "")
 requested_site_column <- trimws(as.character(requested_site_column))
 
+
 age_min <- 18
 age_max_exclusive <- 120
 support_start_days <- 7
@@ -122,7 +122,7 @@ baseline_pairing_hours <- 4
 fio2_pairing_hours <- 4
 fio2_min <- 0.21
 fio2_max <- 1
-spo2_min <- 70 # Chad's updated plausibility lower bound
+spo2_min <- 70 
 spo2_max <- 97
 hfno_sf_max_exclusive <- 315
 hfno_fio2_min_exclusive <- 0.50
@@ -332,11 +332,7 @@ hospitalization <- hospitalization[
   by = hospitalization_id
 ]
 
-# Assign the real hospital/site associated with each component encounter. For
-# a combined multisite Hopkins extract, this follows the collaborator example:
-# the first nonmissing ADT hospital ordered by in_dttm. An explicitly requested
-# hospitalization column takes precedence. The constant fallback is intended
-# only for site-separated deliveries or records lacking hospital provenance.
+# Assign the hospital/site associated with each component encounter. 
 site_assignment_source <- "fallback_site_id"
 site_source_column <- ""
 deferred_adt_site_assignment <- FALSE
@@ -359,10 +355,6 @@ if (nzchar(requested_site_column)) {
     character()
   if (file.exists(adt_path) &&
       all(c("hospitalization_id", "hospital_id", "in_dttm") %in% adt_columns)) {
-    # clif_adt can be much larger than all other cohort tables combined. Do not
-    # collect it here. Hospital attribution is not an eligibility criterion, so
-    # defer the ADT query until eligible blocks are known and then read ADT rows
-    # only for those component hospitalization IDs.
     hospitalization[, source_site_id := NA_character_]
     deferred_adt_site_assignment <- TRUE
     site_assignment_source <- "first_adt_hospital_deferred_to_eligible_blocks"
@@ -447,6 +439,7 @@ hospital_blocks[, admission_type_category_clean := normalize_category(
   admission_type_category
 )]
 setorder(hospital_blocks, patient_id, admission_dttm, hospital_block_id)
+
 
 # ---- Diagnosis eligibility ---------------------------------------------------
 
@@ -1084,7 +1077,8 @@ if (anyDuplicated(cohort$patient_id)) {
   stop("Internal error: final cohort has more than one block per patient.")
 }
 
-# ---- Attrition and design audit ---------------------------------------------
+
+# ---- record attrition and design ---------------------------------------------
 
 count_blocks <- function(block_ids) {
   block_ids <- unique(block_ids)

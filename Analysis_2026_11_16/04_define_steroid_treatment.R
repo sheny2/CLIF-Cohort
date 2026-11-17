@@ -59,7 +59,7 @@ administrations <- as.data.table(read_parquet(candidate_path))
 cohort <- as.data.table(read_parquet(cohort_path))
 required_administration_columns <- c(
   "patient_id", "hospital_block_id", "admin_dttm", "med_group",
-  "med_category", "med_dose", "med_dose_unit", "med_route_category"
+  "med_category", "med_dose", "med_dose_unit", "med_route_category", "mar_action_category"
 )
 missing_administration_columns <- setdiff(
   required_administration_columns, names(administrations)
@@ -74,7 +74,7 @@ if (!all(c("patient_id", "hospital_block_id") %in% names(cohort))) {
 }
 
 normalize_text <- function(x) tolower(trimws(as.character(x)))
-normalize_drug <- function(x) gsub("[^a-z]", "", normalize_text(x))
+normalize_drug <- normalize_text
 normalize_unit <- function(x) {
   value <- normalize_text(x)
   value <- gsub("μ", "u", value, fixed = TRUE)
@@ -105,6 +105,7 @@ administrations[, `:=`(
   med_group_clean = normalize_text(med_group),
   med_category_clean = normalize_drug(med_category),
   med_route_clean = normalize_text(med_route_category),
+  mar_action_clean = normalize_text(mar_action_category),
   med_dose_numeric = suppressWarnings(as.numeric(med_dose)),
   med_dose_unit_clean = normalize_unit(med_dose_unit),
   admin_dttm = as.POSIXct(admin_dttm, tz = "UTC")
@@ -127,7 +128,8 @@ administrations[, route_eligible_for_drug := mapply(
   }, med_route_clean, eligible_routes
 )]
 administrations[, qualification_reason := fcase(
-  !med_group_clean %in% c("steroid", "steroids"), "not_steroid_med_group",
+  !med_group_clean %in% "steroid", "not_steroid_med_group",
+  !mar_action_clean %in% "given", "administration_not_given_or_unknown",
   is.na(minimum_dose_mg), "med_category_not_in_definition",
   is.na(med_dose_numeric) | med_dose_numeric <= 0, "missing_or_nonpositive_dose",
   is.na(dose_mg), "unsupported_or_missing_dose_unit",
@@ -138,6 +140,9 @@ administrations[, qualification_reason := fcase(
 administrations[, qualifies_as_treatment := as.integer(
   qualification_reason == "qualifying_treatment_administration"
 )]
+action_audit <- administrations[, .(n_administration_rows = .N,
+  qualifying_rows = sum(qualifies_as_treatment)), by = mar_action_clean]
+fwrite(action_audit, file.path(output_dir, "steroid_administration_action_audit.csv"), na = "")
 
 if (!"hours_from_time_zero" %in% names(administrations) &&
     "respiratory_failure_start" %in% names(administrations)) {
@@ -236,12 +241,12 @@ write_parquet(
 definition <- rbindlist(list(
   data.table(parameter = c(
     "medication_table", "med_group", "administration_time", "dose_rule",
-    "summary_small_cell_threshold", "grace_hours"
+    "summary_small_cell_threshold", "grace_hours", "required_mar_action"
   ), value = c(
-    "clif_medication_admin_intermittent", "steroid;steroids", "admin_dttm",
+    "clif_medication_admin_intermittent", "steroid", "admin_dttm",
     "drug-specific per-administration threshold; see steroid_dose_route_rules.csv",
     as.character(small_cell_threshold),
-    if (is.finite(grace_hours)) as.character(grace_hours) else "NOT SPECIFIED"
+    if (is.finite(grace_hours)) as.character(grace_hours) else "NOT SPECIFIED", "given"
   ))
 ), use.names = TRUE)
 fwrite(definition, file.path(output_dir, "steroid_treatment_definition.csv"),

@@ -56,6 +56,27 @@ argument is a synthetic `tests/test_pipeline.R` result folder, never real data.
 
 ## Changes in this version
 
+Script 02 is a targeted intermittent-medication source check. It accepts only
+the confirmed `steroid` group label, reports observed group
+labels and counts, and summarizes routes and drug/route/dose-unit combinations.
+Broad vocabulary discovery across all medication tables is no longer repeated.
+The command arguments are unchanged; 03/04 do not depend on 02's profile CSVs.
+Treatment eligibility remains defined by 03/04, including drug-specific doses
+and routes in 04. Source-profile row counts are not treated-patient counts. The server source
+check confirmed `med_group = steroid` with 204,291 administration rows; scripts
+02--04 no longer accept the plural group label.
+
+03 filters the confirmed `iv`/`enteral` routes and retains administration
+actions for auditing. 04 requires `mar_action_category = given`; `not_given`
+and unknown actions cannot establish treatment initiation. See
+`steroid_administration_action_counts.csv` in 02 and
+`steroid_administration_action_audit.csv` in 04. Drug/dose/route thresholds
+are unchanged, and weight-based doses remain excluded. Rerun 02--10 after
+this update using a fresh run with the existing 01 cohort outputs copied in,
+or rerun the full pipeline in a fresh run. Old estimates have not been updated.
+CPAP remains grouped with NIPPV for covariates but does not independently
+qualify eligibility in 01; resolving acute versus chronic CPAP requires review.
+
 Unmapped-site hospital blocks (including `hopkins_unspecified`, blank/missing IDs,
 and unknown/unmapped/unspecified placeholder labels) are excluded in script 01,
 after site resolution and before selecting one block per patient. Attrition

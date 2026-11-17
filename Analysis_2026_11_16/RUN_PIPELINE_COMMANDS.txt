@@ -1,7 +1,9 @@
-# Standalone analysis dated 2026-11-16. Run in bash/zsh on the data server.
-# Change the first cd if your project is stored elsewhere.
+# Standalone analysis dated 2026-11-16. Run in bash on server terminal.
+# Change the first cd if project is stored elsewhere.
 set -euo pipefail
+
 cd /projects/emulate_icu/CLIF-Cohort/Analysis_2026_11_16
+
 
 # Relative to the CLIF-Cohort folder, source data remain ../rclif_2_1.
 # This analysis folder is directly inside CLIF-Cohort.
@@ -11,14 +13,13 @@ export R_DATATABLE_NUM_THREADS=1
 export TREATMENT_GRACE_HOURS=24
 export CLIF_DATA_CUTOFF_DATE=2026-10-31
 export HOSPITAL_BLOCK_GAP_HOURS=6
-export COHORT_SELECTION_SEED=32284
-export PNEUMONIA_CASE_DEFINITION=poa_any
+export COHORT_SELECTION_SEED=2026
+export PNEUMONIA_CASE_DEFINITION=poa_any  # qualifying pneumonia diagnosis present on admission
 export CLIF_SITE_ID=hopkins_unspecified
-export SUMMARY_SMALL_CELL_THRESHOLD=1
+export SUMMARY_SMALL_CELL_THRESHOLD=1 
 
-# A fresh result directory for every run, entirely inside this dated folder.
-# Rerun from 01 after the unmapped-site exclusion update. Do not reuse older
-# cohort/analysis outputs: 05/07/08/09 reject unmapped-site records in old inputs.
+
+# A fresh result directory for every run
 export RUN_ROOT="$PWD/results/run_$(date +%Y%m%d_%H%M%S)_grace${TREATMENT_GRACE_HOURS}h"
 export COHORT_OUTPUT_DIR="$RUN_ROOT/sensitive/cohort"
 export GLUCOCORTICOID_CHECK_DIR="$RUN_ROOT/sensitive/source_profile"
@@ -27,34 +28,40 @@ export STEROID_TREATMENT_DIR="$RUN_ROOT/sensitive/steroid_treatment"
 export SUMMARY_EDA_DIR="$RUN_ROOT/aggregate/eda"
 mkdir -p "$RUN_ROOT/logs"
 
+
 Rscript 01_build_adult_pneumonia_cohort.R \
  "$CLIF_DATA_DIR" "$COHORT_OUTPUT_DIR" "$PNEUMONIA_CASE_DEFINITION" \
  "$HOSPITAL_BLOCK_GAP_HOURS" "$COHORT_SELECTION_SEED" "$CLIF_SITE_ID" \
  2>&1 | tee "$RUN_ROOT/logs/01.log"
 
+
 Rscript 02_profile_glucocorticoid_sources.R \
  "$CLIF_DATA_DIR" "$GLUCOCORTICOID_CHECK_DIR" \
  2>&1 | tee "$RUN_ROOT/logs/02.log"
+
 
 Rscript 03_extract_candidate_steroid_administrations.R \
  "$CLIF_DATA_DIR" "$COHORT_OUTPUT_DIR" "$STEROID_CANDIDATE_DIR" \
  2>&1 | tee "$RUN_ROOT/logs/03.log"
 
+
 Rscript 04_define_steroid_treatment.R \
  "$STEROID_CANDIDATE_DIR" "$COHORT_OUTPUT_DIR" "$STEROID_TREATMENT_DIR" \
  "$TREATMENT_GRACE_HOURS" 2>&1 | tee "$RUN_ROOT/logs/04.log"
+
 
 Rscript 05_cohort_summary_eda.R \
  "$CLIF_DATA_DIR" "$COHORT_OUTPUT_DIR" "$STEROID_TREATMENT_DIR" \
  "$SUMMARY_EDA_DIR" "$SUMMARY_SMALL_CELL_THRESHOLD" "$CLIF_DATA_CUTOFF_DATE" \
  "$RUN_ROOT/sensitive/eda_preparation" 2>&1 | tee "$RUN_ROOT/logs/05.log"
 
-# 06 is a local method library, sourced automatically; no separate run needed.
-# 07 has its own preparation and does not rely on a saved 05 cache.
+
+# 06 is a local method library, sourced automatically
 Rscript 07_prepare_and_run_five_methods.R \
  "$CLIF_DATA_DIR" "$COHORT_OUTPUT_DIR" "$STEROID_TREATMENT_DIR" \
  "$RUN_ROOT" "$CLIF_DATA_CUTOFF_DATE" \
  2>&1 | tee "$RUN_ROOT/logs/07.log"
+
 
 # Main summaries: $RUN_ROOT/aggregate/analysis/five_method_results.csv
 # Weight diagnostics: $RUN_ROOT/aggregate/analysis/
@@ -64,12 +71,15 @@ Rscript 07_prepare_and_run_five_methods.R \
 # To try a different grace period, edit TREATMENT_GRACE_HOURS above and rerun.
 # The cohort/timing EDA continues to show both 24-hour and 96-hour comparisons.
 
+
 # 08: independent site-local CCW + random-effects meta-analysis; reads completed 07.
 # Extra package required: install.packages("metafor") in the R environment.
 Rscript 08_local_ccw_meta_analysis.R "$RUN_ROOT" \
  2>&1 | tee "$RUN_ROOT/logs/08.log"
 # New six-method forest/results: $RUN_ROOT/aggregate/local_ccw_meta/
 # Original five-method outputs in aggregate/analysis/ remain unchanged.
+
+
 
 # Optional 09: one historical NCO, diagnostic only. Set the EXPANDED table path
 # explicitly; the original filtered hospitalization table is not sufficient.
