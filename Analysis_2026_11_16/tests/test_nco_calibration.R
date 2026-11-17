@@ -21,6 +21,12 @@ y<-build_historical_nco_panel(c,cw,h,as.Date("2024-01-01"))$cohort
 stopifnot(all(is.na(y$nco_any_admission)))
 z<-historical_log_pr(c(0,1,0,1),rep(1,4),rep(1,4))
 stopifnot(z$log_pr==0,z$se_log_pr==0)
+# Independent arms: var(log PR)=(1-p1)/(n1*p1)+(1-p0)/(n0*p0).
+# This must not reuse the prevalence-difference SE stored in z$se.
+z<-historical_log_pr(c(1,1,0,0,1,0,0,0),c(rep(1,4),rep(0,4)),c(rep(0,4),rep(1,4)))
+expected_se<-sqrt((1-.5)/(4*.5)+(1-.25)/(4*.25))
+stopifnot(abs(z$se_log_pr-expected_se)<1e-12,abs(z$se_log_pr-z$se)>.1,
+  abs(z$pr_lower-exp(log(2)-1.96*expected_se))<1e-12)
 z<-historical_log_pr(c(0,1,0,1),c(0,1,0,1),c(1,0,1,0))
 stopifnot(is.na(z$log_pr)) # no continuity correction when comparator prevalence is zero
 set.seed(123)

@@ -67,7 +67,10 @@ historical_log_pr <- function(y,w1,w0) {
   if(d$status!="ok"||!is.finite(d$p_early)||!is.finite(d$p_control)||d$p_early<=0||d$p_control<=0)return(d)
   y[!ok]<-0
   influence<-w1*(y-d$p_early)/sum(w1)/d$p_early-w0*(y-d$p_control)/sum(w0)/d$p_control
-  est<-log(d$p_early/d$p_control);se<-sqrt(sum(influence^2))
-  d[,`:=`(log_pr=est,se_log_pr=se,prevalence_ratio=exp(est),pr_lower=exp(est-1.96*se),pr_upper=exp(est+1.96*se))]
+  est<-log(d$p_early/d$p_control);log_pr_se_value<-sqrt(sum(influence^2))
+  # d already has a column named se (RD scale). A distinct local name avoids
+  # data.table resolving that column instead of the log-ratio SE.
+  d[,`:=`(log_pr=est,se_log_pr=log_pr_se_value,prevalence_ratio=exp(est),
+    pr_lower=exp(est-1.96*log_pr_se_value),pr_upper=exp(est+1.96*log_pr_se_value))]
   d
 }
