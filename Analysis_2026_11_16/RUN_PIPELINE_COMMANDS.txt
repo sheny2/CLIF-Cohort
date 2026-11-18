@@ -96,3 +96,7 @@ if [[ -n "${EXPANDED_HOSPITALIZATION_PATH:-}" ]]; then
  Rscript 10_historical_nco_calibration.R "${NCO_ARGS[@]}" \
   2>&1 | tee "$RUN_ROOT/logs/10.log"
 fi
+
+# Optional 11 (after 07; independent of 09/10): prior utilization EDA.
+# Rscript 11_prior_utilization_eda.R "$RUN_ROOT" \
+#  "$CLIF_DATA_DIR/clif_hospitalization.parquet" 2>&1 | tee "$RUN_ROOT/logs/11.log"

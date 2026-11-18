@@ -127,6 +127,7 @@ We also now have `/projects/emulate_icu/rclif_2_1/clif_hospitalization.parquet` 
 | 08 | Fit CCW independently within each site, then meta-analyze site contrasts | `aggregate/local_ccw_meta/` |
 | 09, optional | Diagnose any prior-year hospitalization as a historical NCO | `aggregate/nco_prior_hospitalization/` |
 | 10, optional | Build a historical NCO panel and explore NN/MNN bias calibration | `aggregate/nco_calibration/` |
+| 11, optional | Describe prior hospitalization and ED-origin hospitalization counts and durations | `aggregate/prior_utilization_eda/` |
 
 07 reports federated CCW, pooled site-stratified CCW, landmark IPW, IPCW without
 cloning, and unweighted per-protocol estimates. Outputs include risk differences,
@@ -291,3 +292,40 @@ with NN under the MNN label.
 Other tests cover hospital blocks, outcomes, adjacent filling, S/F pairing, and
 local meta-analysis. Some accept a completed synthetic run for integration
 checks; read their usage comments before supplying an argument.
+
+## Prior utilization EDA: 11
+
+Run after 07; 09/10 are not prerequisites. No weighting models are changed:
+
+```bash
+Rscript 11_prior_utilization_eda.R "$RUN_ROOT" \
+  /projects/emulate_icu/rclif_2_1/clif_hospitalization.parquet \
+  2>&1 | tee "$RUN_ROOT/logs/11.log"
+```
+
+An optional third argument is a verified system history-coverage start date.
+All available history means completed episodes before index block admission,
+never future encounters. The annual window counts episodes starting within the
+preceding 365 days, matching 09/10. All cohort patients remain included.
+
+Outputs in `aggregate/prior_utilization_eda/` include patient counts and
+cumulative/mean/longest duration, episode length-of-stay summaries, recency,
+count distributions, and plots overall/by site/by observed treatment group.
+Summary CSVs contain original-unit means, SDs, quartiles, 95th percentiles,
+minima and maxima. Patient count/total-duration summaries include observed
+zeros; mean duration and recency are undefined without an observed episode.
+Individual histories and invalid records remain in `sensitive/prior_utilization_eda/`.
+
+**ED-origin hospitalization is not a standalone ED visit.** It uses the first
+component's admission category and measures the full hospital episode's span,
+not time specifically in the ED. Standalone ED visits/dwell times require
+additional encounter/location data. Unknown admission types are flagged.
+
+Episodes merge overlaps and gaps ≤6 hours. Full episode durations include these
+bridging gaps and are not exact occupied bed-days. A separate
+`hospital_days_overlapping_previous_year.csv` clips durations to the lookback,
+including completed episodes starting earlier. Invalid dates and unverified
+coverage are audited; zero observed episodes does not establish complete
+absence of prior care. All-history comparisons have unequal observation time.
+No duration is silently trimmed; plots use log(1 + duration), with uncapped
+values in CSVs. Tests: `Rscript tests/test_history_eda.R`.
