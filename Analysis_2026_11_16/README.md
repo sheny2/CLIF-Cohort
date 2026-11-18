@@ -15,19 +15,18 @@ No scripts from the parent folder are required.
 
 | Item | Current implementation |
 |---|---|
-| Comparison | Initiation within the grace period versus no initiation within that period; comparator patients may initiate later |
-| Grace period | 24 hours by default |
+| Comparison | Initiation within the grace period versus no initiation within that period; comparator patients may initiate later or never initiate|
+| Grace period | 24 hours (by default) |
 | Time zero | Qualifying respiratory-support initiation in the selected hospitalization block |
 | Follow-up | Up to 28 days, represented in six-hour intervals |
 | Primary outcome | In-hospital death or hospice discharge by day 28 in the selected block |
-| Unit | One randomly selected eligible hospitalization block per patient |
-| Sites | Hospital IDs resolved from source records; unmapped-site blocks are excluded |
+| Unit | One randomly selected eligible hospitalization block/episode per patient |
+| Sites | Hospital IDs resolved from source records |
 
-A **hospitalization block is not a six-hour stay**. Overlapping encounters and
-encounters separated by no more than six hours are merged into an episode that
-can last days or weeks. Six hours is also the analysis-interval length; these
-are separate concepts. Multiple eligible episodes are reduced to one per
-patient using the configured selection seed.
+Overlapping encounters and encounters separated by no more than six hours are merged into an episode (that
+can last days or weeks). 
+Six hours is also the analysis-interval length. 
+
 
 ### Cohort eligibility: 01
 
@@ -35,20 +34,20 @@ The principal criteria are:
 
 - Age at admission at least 18 and below 120 years.
 - ED-origin admission (`admission_type_category = ed`).
-- Qualifying ICD-10-CM pneumonia present on admission, in any diagnosis
+- Qualifying ICD-10-CM pneumonia present on admission (poa), in any diagnosis
   position (`poa_any`): J12–J18, including J17. Influenza and the separately
   specified excluded pneumonia codes do not qualify; see `pneumonia_icd_helpers.R`.
 - IMV or NIPPV initiation, or HFNO initiation with S/F <315 and FiO2 >0.50,
   within the first seven days of the block. HFNO qualification requires
-  SpO2 ≤97%; there is no minimum future support-duration requirement.
+  SpO2 ≤97%; there is no minimum future support-duration requirement though.
 - No recorded death before time zero and no qualifying DNR/DNI-equivalent status.
 - No concurrent shock proxy under the implemented rules: norepinephrine or
   epinephrine on NIPPV/HFNO; dose >0.25 mcg/kg/min on IMV; any vasopressin;
   or lactate ≥4 mmol/L. Pressor and lactate lookbacks are six hours.
 
+Currently we have around ~4,500 patients. 
 Review `adult_pneumonia_attrition.csv` and `adult_pneumonia_cohort_design.csv`
-for the actual run. Unmapped-site exclusion occurs before selecting one block
-per patient. Older inputs containing unmapped sites are rejected downstream.
+for the actual run. 
 
 ### Treatment definition: 03–04
 
@@ -66,9 +65,8 @@ administration**, not per day:
 
 **Only `mar_action_category = given` can establish treatment.** `not_given`
 and unknown actions are excluded. Other drugs/routes and unsupported dose
-units, including `mg/kg/dose`, do not qualify. 04 writes reasons for exclusion
-and an administration-action audit. Source-wide medication counts are
-administration rows, not treated-patient counts.
+units, including `mg/kg/dose`, do not qualify. 
+
 
 ### Outcome and discharge handling
 
@@ -79,18 +77,17 @@ administration rows, not treated-patient counts.
 - Hospice discharge at its discharge timestamp.
 - The earliest qualifying component determines the event.
 - Other alive discharges, including transfers, are not primary events and are
-  not censoring at discharge; they remain event-free through day 28 unless
-  administratively censored.
+  not censoring at discharge; they remain event-free through day 28 unless administratively censored.
 - Post-discharge death timestamps are excluded from this endpoint.
 
 Thus the endpoint differs from 28-day all-cause mortality. Administrative
-censoring uses the configured data cutoff. See `outcome_ascertainment_audit.csv`
-and `natural_censoring_counts.csv` for run-specific counts.
+censoring uses the configured data cutoff. 
+Again see `outcome_ascertainment_audit.csv`and `natural_censoring_counts.csv` for specific counts.
 
 ## Run on the data server
 
-Required R packages: `arrow`, `data.table`, `dplyr`, `ggplot2`, `survival`;
-`metafor` is required for 08.
+I prepared `RUN_PIPELINE_COMMANDS.txt` to run the full pipeline in one command. 
+It is a bash script that sets up the environment and runs each numbered script in order. 
 
 ```bash
 cd /projects/emulate_icu/CLIF-Cohort/Analysis_2026_11_16
@@ -109,27 +106,23 @@ Before launching, review the exports in that command file:
 | `PNEUMONIA_CASE_DEFINITION` | `poa_any` |
 | `SUMMARY_SMALL_CELL_THRESHOLD` | `1` |
 
-Edit the command-file grace-period export to try another window; accepted
-windows are multiples of six hours below 28 days. The timing EDA separately
-compares 24 and 96 hours. The command file creates a fresh `RUN_ROOT` for each
-run and stops on a failed command. Invoking it with `bash` does not preserve
-its newly assigned `RUN_ROOT` in your parent terminal.
+Edit the command-file grace-period export to try another grace period window. 
+The timing EDA separately compares both 24 and 96 hours. 
+The command file creates a fresh `RUN_ROOT` for each run.
 
-Chad replaced `/projects/emulate_icu/rclif_2_1/clif_hospitalization.parquet`
-with expanded encounters before and after potential index encounters. This is
-the current source. Other historical clinical tables have not necessarily been
-expanded, and complete historical capture must not be assumed.
+We also now have `/projects/emulate_icu/rclif_2_1/clif_hospitalization.parquet` with expanded encounters before and after potential index encounters. 
 
-## Script guide
 
-| Script | Purpose | Main output under the run folder |
+## Script 
+
+| Script | Purpose | Main output under the result folder |
 |---|---|---|
-| 01 | Construct eligible blocks, select one per patient, retain encounter crosswalks | `sensitive/cohort/` |
-| 02 | Check steroid labels, drugs, routes, units, and administration actions | `sensitive/source_profile/` |
+| 01 | Construct eligible blocks, select one per patient | `sensitive/cohort/` |
+| 02 | Check steroid labels, drugs, routes, units, and administration | `sensitive/source_profile/` |
 | 03 | Extract candidate steroid rows linked to the cohort | `sensitive/steroid_candidates/` |
 | 04 | Apply treatment rules and determine treatment timing | `sensitive/steroid_treatment/` |
 | 05 | Cohort EDA, treatment/event timing, support trajectories, covariate availability | `aggregate/eda/` |
-| 06 | Shared method library; sourced automatically, not a separate pipeline command | Used by 07–10 |
+| 06 | Shared method library; sourced in 07 | Used by 07–10 |
 | 07 | Prepare analysis data and run five methods with balance/weight diagnostics | `aggregate/analysis/` |
 | 08 | Fit CCW independently within each site, then meta-analyze site contrasts | `aggregate/local_ccw_meta/` |
 | 09, optional | Diagnose any prior-year hospitalization as a historical NCO | `aggregate/nco_prior_hospitalization/` |
@@ -142,20 +135,18 @@ Initiation/adherence weights freeze after grace; natural-censoring weights can
 continue when applicable. Weight truncation uses the 1st/99th percentiles.
 Landmark analysis conditions on reaching the end of grace without an event.
 
-08 adds local CCW plus REML random-effects meta-analysis with Hartung–Knapp
-intervals. Fixed-effect results are supplementary. It writes site forest plots
-and comparisons of all six methods. Pooled site contrasts need not equal the
-participant-pooled estimate. Influence-function variances treat fitted nuisance
-models as fixed; the main analyses do not bootstrap or fit Cox outcome models.
+08 adds local CCW plus REML random-effects meta-analysis and writes site forest plots and comparisons of all six methods. 
+
+09 and 10 are work in progress for me to explore NCOs.
 
 ## Covariates and measurement processing
 
 `analysis_preparation.R` builds the analysis inputs. Baseline candidates include
 age, sex, initial support/location, admission year/season, and coded
 comorbidities. Time-varying candidates include temperature, WBC, glucose,
-albumin, a non-respiratory SOFA proxy, categorical support, and categorical S/F.
+albumin, a non-respiratory SOFA proxy, categorical respiratory support, and categorical S/F.
 The initiation denominator includes current and lagged time-varying terms.
-Arterial pH and PaCO2 are excluded. Constant or unavailable terms can be removed;
+Arterial pH and PaCO2 are excluded (too much missing). Constant or unavailable terms can be removed;
 **`ipcw_model_specification.csv` lists the exact terms used in each run.**
 
 ### Screening
@@ -177,10 +168,8 @@ Arterial pH and PaCO2 are excluded. Constant or unavailable terms can be removed
 | Creatinine | 0–30 mg/dL |
 | GCS | 3–15 |
 
-Outside-range measurements become missing before temporal selection; a patient
-is not removed solely for one invalid measurement. Permitted zeros are retained.
-There is no additional percentile winsorization of covariates. WBC and glucose
-use log(1 + value) transformations.
+Outside-range measurements become missing; a patient is not removed solely for one invalid measurement. 
+WBC and glucose use log(1 + value) transformations.
 
 ### Missingness and temporal selection
 
@@ -189,12 +178,11 @@ then the nearest valid measurement in the same block to fill remaining inpatient
 gaps. Ties favor earlier records; the fallback has no maximum distance. Source
 records must be within the block and no later than the primary event or data
 cutoff. **This can use future/post-treatment measurements.** Remaining numeric
-gaps receive median imputation and missingness indicators. Support has an
-Unknown category. The non-respiratory SOFA proxy requires all five components
-and is not the complete SOFA score.
+gaps receive median imputation and missingness indicators. 
+The non-respiratory SOFA proxy requires all five components and is not the complete SOFA score.
 
-Respiratory support is represented as room air, conventional oxygen, HFNO,
-NIPPV/CPAP, IMV, or Unknown, rather than an ordinal support score.
+Respiratory support is represented as room air, conventional oxygen, HFNO, NIPPV/CPAP, IMV, or Unknown.
+
 
 ### S/F pairing
 
@@ -202,9 +190,8 @@ For analysis covariates, pair SpO2 with prior FiO2 documented within four hours
 on the same continuous device episode. Device labels are forward-filled only;
 a device change starts a new episode. At each decision time, use the latest
 prior SpO2 no more than four hours old; an intervening device change invalidates
-the pair. SpO2 >97% remains Undefined, rather than being capped or replaced with
-an older lower saturation. FiO2 age is checked at SpO2 time, and SpO2 age is
-checked separately at decision time.
+the pair. SpO2 >97% remains Undefined. 
+FiO2 age is checked at SpO2 time, and SpO2 age is checked separately at decision time.
 
 S/F categories are Undefined, >300 (reference), (250,300], (200,250],
 (120,200], and ≤120, entered as separate indicators with their lags. S/F is not
@@ -221,11 +208,11 @@ results/run_<timestamp>_grace24h/
     local_ccw_meta/
     nco_prior_hospitalization/   # optional
     nco_calibration/            # optional
-  sensitive/                   # patient-level inputs, histories, fits, and audits
+  sensitive/                   # patient-level inputs, histories, fits (not shared)
   logs/                        # one log per executed script
 ```
 
-| Review question | Files to inspect |
+| FAQ | Files to inspect |
 |---|---|
 | Who entered the cohort? | `sensitive/cohort/adult_pneumonia_attrition.csv` and `adult_pneumonia_cohort_design.csv`; EDA also exports cohort summaries |
 | Which administrations counted? | `sensitive/steroid_treatment/steroid_dose_route_rules.csv`, `steroid_administration_action_audit.csv`, and row-level eligibility parquet |
