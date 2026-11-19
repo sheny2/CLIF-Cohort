@@ -100,3 +100,6 @@ fi
 # Optional 11 (after 07; independent of 09/10): prior utilization EDA.
 # Rscript 11_prior_utilization_eda.R "$RUN_ROOT" \
 #  "$CLIF_DATA_DIR/clif_hospitalization.parquet" 2>&1 | tee "$RUN_ROOT/logs/11.log"
+
+# Optional 12 (after 07): pre-time-zero exposure among interval-1 starters.
+# Rscript 12_steroid_initiation_audit.R "$RUN_ROOT" 2>&1 | tee "$RUN_ROOT/logs/12.log"
