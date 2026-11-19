@@ -30,6 +30,7 @@ write(c[,.(patients=.N,observed_prior_admission=sum(prior_year_admission==1L,na.
 write_parquet(c,file.path(sensitive,"cohort_with_primary_nco.parquet"))
 write_parquet(constructed$episodes,file.path(sensitive,"qualifying_prior_admission_episodes.parquet"))
 weights<-readRDS(file.path(inp,"weight_diagnostics_patient_level.rds"));cfg<-weights$config
+if(!identical(cfg$discharge_rule,G6_DISCHARGE_RULE))stop("Rerun 07 with the current alive-discharge strategy rule before 09")
 long<-as.data.frame(read_parquet(file.path(inp,"pneumonia_ccw_long.parquet")))
 assert_mapped_sites(long$site)
 p<-g6_prepare_data(long,"site","hospital_block_id","m","event_m","censor_m","init_m",NULL,

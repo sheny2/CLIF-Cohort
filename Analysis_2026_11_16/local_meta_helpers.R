@@ -2,7 +2,7 @@
 local_ccw_prepare <- function(long,design) {
  x <- data.table::copy(data.table::as.data.table(long))
  tau <- design$tau_intervals
- decision <- x$m<=tau & x$m<=x$S
+ decision <- x$m<=tau & x$m<=x$S & x$m<=x$adherence_end_m
  audit <- list()
  numeric <- sub("_model$","",grep("_model$",design$time_varying_covariates,value=TRUE))
  for(v in numeric) {
@@ -33,7 +33,7 @@ local_ccw_prepare <- function(long,design) {
    censoring_denominator=c(".time",baseline,".trt"),censoring_numerator=".time")
  cfg <- list(tau=tau,horizon=design$horizon_intervals,baseline=baseline,tv=tv,lag_names=prepared$lag_names,
    terms=terms,learners=list(initiation=g6_default_binary_learner(),censoring=g6_default_binary_learner()),
-   trunc=c(.01,.99),lag_initial=0)
+   trunc=c(.01,.99),lag_initial=0,discharge_rule=G6_DISCHARGE_RULE)
  list(data=prepared$data,cfg=cfg,processing=data.table::rbindlist(audit,fill=TRUE))
 }
 

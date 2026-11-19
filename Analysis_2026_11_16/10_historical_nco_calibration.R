@@ -52,6 +52,7 @@ availability<-rbindlist(lapply(definitions$nco,function(nm)c[,.(nco=nm,patients=
   unverified_coverage=sum(is.na(coverage_verified))),by=site]))
 write(availability,"nco_availability_by_site.csv")
 weights<-readRDS(file.path(inp,"weight_diagnostics_patient_level.rds"));cfg<-weights$config
+if(!identical(cfg$discharge_rule,G6_DISCHARGE_RULE))stop("Rerun 07 and 09 with the current alive-discharge strategy rule before 10")
 long<-as.data.frame(read_parquet(file.path(inp,"pneumonia_ccw_long.parquet")))
 assert_mapped_sites(long$site)
 p<-g6_prepare_data(long,"site","hospital_block_id","m","event_m","censor_m","init_m",NULL,

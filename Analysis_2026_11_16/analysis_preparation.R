@@ -384,6 +384,19 @@ cohort <- merge(
 cohort[, S := to_interval(treatment_hours)]
 cohort[S > T_event | S > T_censor, S := M + 1L]
 cohort[, A_tau := as.integer(S <= tau)]
+cohort[, discharge_hours := as.numeric(difftime(discharge_dttm,index_dttm,units="hours"))]
+cohort[, ordinary_alive_discharge := is.na(event_dttm) & is.finite(discharge_hours) & discharge_hours >= 0 &
+  discharge_dttm <= data_cutoff_dttm & !is.na(outcome_discharge_category) &
+  !outcome_discharge_category %in% c("", "expired", "still admitted", "still_admitted", "unknown", "unspecified", "na", "n/a")]
+cohort[, adherence_end_m := fifelse(ordinary_alive_discharge,
+  pmin(M,pmax(0L,as.integer(ceiling(discharge_hours/step_hours)))),M)]
+cohort[ordinary_alive_discharge == TRUE, `:=`(T_censor = M + 1L, T_obs = M)]
+cohort[, early_alive_discharge_untreated := ordinary_alive_discharge & discharge_hours <= grace_hours &
+  (!is.finite(treatment_hours) | treatment_hours > discharge_hours)]
+write_shareable_csv(cohort[,.(patients=.N,
+  untreated_alive_discharge_by_grace=sum(early_alive_discharge_untreated),
+  alive_discharge_by_grace_after_initiation=sum(ordinary_alive_discharge & discharge_hours<=grace_hours & !early_alive_discharge_untreated)),
+  by=.(site=source_site_id)],"early_alive_discharge_strategy_audit.csv")
 
 # Raw outcome counts. These are descriptive cohort quantities, not adjusted
 # causal estimates. In particular, treatment-group comparisons can be affected
@@ -461,6 +474,8 @@ grid <- cohort[
     index_dttm,
     admission_dttm,
     discharge_dttm,
+    adherence_end_m,
+    early_alive_discharge_untreated,
     event_dttm,
     S,
     A_tau,
@@ -756,7 +771,7 @@ for(j in seq_along(SF_DUMMIES)) {
 }
 sf_coverage<-rbindlist(list(
  long[,.(scope="all_observed_rows",rows=.N,eligible=sum(is.finite(sf_ratio))),by=.(site,m,sf_reason)],
- long[m<=tau & m<=S,.(scope="untreated_decisions_during_grace",rows=.N,eligible=sum(is.finite(sf_ratio))),by=.(site,m,sf_reason)]))
+ long[m<=tau & m<=S & m<=adherence_end_m,.(scope="untreated_decisions_during_grace",rows=.N,eligible=sum(is.finite(sf_ratio))),by=.(site,m,sf_reason)]))
 write_shareable_csv(sf_coverage,"sf_decision_time_coverage.csv")
 write_shareable_csv(long[,.(patients=.N),by=.(site,m,sf_category)],"sf_category_counts_by_interval.csv")
 write_shareable_csv(data.table(category=SF_LEVELS,
@@ -817,7 +832,7 @@ plausible_limits <- lapply(setNames(raw_tv,raw_tv),function(v) {
 })
 # Estimate transformations/imputation from untreated decision rows during grace,
 # so post-discharge follow-up does not dominate those choices.
-processing_rows <- long$m <= tau & long$m <= long$S
+processing_rows <- long$m <= tau & long$m <= long$S & long$m <= long$adherence_end_m
 
 covariate_qa <- rbindlist(lapply(raw_tv, function(variable) {
   limits <- plausible_limits[[variable]]
@@ -962,10 +977,11 @@ design <- list(
   analysis_version = "Analysis_2026_11_16",
   sf_definition = SF_DEFINITION,
   measurement_processing = "Chad bounds; nearest same-block fallback; no winsorization",
-  analysis_unit = "one eligible six-hour hospital block per patient",
+  analysis_unit = "one eligible hospitalization block per patient",
   time_zero = "respiratory-failure start",
   treatment = "first qualifying systemic glucocorticoid administration",
-  strategy_1 = "initiate qualifying glucocorticoid within the grace period",
+  strategy_1 = "initiate qualifying glucocorticoid within grace unless discharged alive untreated by the deadline",
+  discharge_rule = "untreated_alive_discharge_by_grace_compatible_both_v1",
   strategy_0 = "do not initiate qualifying glucocorticoid within the grace period; later initiation allowed",
   outcome = PRIMARY_OUTCOME,
   alive_discharge = "Other alive discharge is event-free, not censoring; subsequent post-discharge death excluded",

@@ -8,6 +8,7 @@
 # follow the original five-method implementation; see README for limitations.
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
+G6_DISCHARGE_RULE <- "untreated_alive_discharge_by_grace_compatible_both_v1"
 
 g6_clamp_prob <- function(p, eps = 1e-6) {
   pmin(pmax(as.numeric(p), eps), 1 - eps)
@@ -135,6 +136,14 @@ g6_prepare_data <- function(data, site_col, id_col, time_col, event_col,
                               function(x) c(0L, head(x, -1L))),
                        use.names = FALSE)
   d$.time_f <- factor(d$.time, levels = seq_len(horizon))
+  if (!"adherence_end_m" %in% names(d)) d$adherence_end_m <- horizon
+  if (!"early_alive_discharge_untreated" %in% names(d)) d$early_alive_discharge_untreated <- FALSE
+  if (anyNA(d$adherence_end_m) || any(d$adherence_end_m < 0 | d$adherence_end_m > horizon) ||
+      anyNA(d$early_alive_discharge_untreated)) stop("Invalid discharge-adherence fields")
+  for (v in c("adherence_end_m", "early_alive_discharge_untreated")) {
+    if (any(vapply(split(d[[v]],d$.uid),function(x)length(unique(x))!=1L,logical(1))))
+      stop("Discharge-adherence fields must be constant per subject")
+  }
 
   baseline_bad <- vapply(baseline_covariates, function(v) {
     any(vapply(split(d[[v]], d$.uid),
@@ -208,7 +217,7 @@ g6_predict_binary <- function(fit, newdata) {
 }
 
 g6_common_init_numerator <- function(d, horizon) {
-  ad <- d[d$.time <= pmin(d$.S, horizon), , drop = FALSE]
+  ad <- d[d$.time <= pmin(d$.S, horizon, d$adherence_end_m), , drop = FALSE]
   out <- numeric(horizon)
   for (m in seq_len(horizon)) {
     rows <- ad$.time == m
@@ -231,7 +240,7 @@ g6_local_components <- function(d, cfg, common_init_num = NULL) {
   event[cell] <- d$.event == 1L
   censor[cell] <- d$.censor == 1L
 
-  init_rows <- d$.time <= pmin(d$.S, cfg$tau)
+  init_rows <- d$.time <= pmin(d$.S, cfg$tau, d$adherence_end_m)
   ad <- d[init_rows, , drop = FALSE]
   afit <- g6_fit_binary(ad, ".init", cfg$terms$initiation_denominator,
                         cfg$learners$initiation)
@@ -249,13 +258,13 @@ g6_local_components <- function(d, cfg, common_init_num = NULL) {
     Hnum[acell] <- g6_clamp_prob(common_init_num[ad$.time])
   }
 
-  cd <- d[d$.event == 0L, , drop = FALSE]
+  cd <- d[d$.event == 0L & d$.time <= d$adherence_end_m, , drop = FALSE]
   cfit <- g6_fit_binary(cd, ".censor", cfg$terms$censoring_denominator,
                         cfg$learners$censoring)
   cnfit <- g6_fit_binary(cd, ".censor", cfg$terms$censoring_numerator,
                          cfg$learners$censoring)
   cd1 <- cd
-  Son1 <- ifelse(cd$.S <= cfg$tau, cd$.S, cfg$tau)
+  Son1 <- ifelse(cd$early_alive_discharge_untreated, Inf, ifelse(cd$.S <= cfg$tau, cd$.S, cfg$tau))
   cd1$.trt <- as.integer(cd1$.time >= Son1)
   cd0 <- cd
   cd0$.trt <- as.integer(cd0$.S > cfg$tau & cd0$.time > cfg$tau & cd0$.time >= cd0$.S)
@@ -266,7 +275,7 @@ g6_local_components <- function(d, cfg, common_init_num = NULL) {
   Cnum[ccell] <- g6_predict_binary(cnfit, cd)
 
   S <- units$.S
-  C1 <- ifelse(S <= cfg$tau, M + 1, cfg$tau - 1L)
+  C1 <- ifelse(S <= cfg$tau | units$early_alive_discharge_untreated, M + 1, cfg$tau)
   C0 <- ifelse(is.finite(S) & S <= cfg$tau, S - 1L, M + 1)
   W1 <- W0 <- matrix(1, n, M)
 
@@ -275,17 +284,17 @@ g6_local_components <- function(d, cfg, common_init_num = NULL) {
     for (m in seq_len(M)) {
       hd <- Hden[i, m]; hn <- Hnum[i, m]
       if (is.finite(hd) && is.finite(hn)) {
-        if (m <= cfg$tau) {
+        if (m <= cfg$tau && m <= units$adherence_end_m[i]) {
           if (S[i] == m) aw1 <- aw1 * hn / hd
           if (S[i] > m) aw1 <- aw1 * (1 - hn) / (1 - hd)
         }
-        if (m <= cfg$tau && S[i] > m) aw0 <- aw0 * (1 - hn) / (1 - hd)
+        if (m <= cfg$tau && m <= units$adherence_end_m[i] && S[i] > m) aw0 <- aw0 * (1 - hn) / (1 - hd)
       }
 
       W1[i, m] <- aw1 * nw1
       W0[i, m] <- aw0 * nw0
 
-      if (obs[i, m] && !event[i, m] && !censor[i, m] &&
+      if (m < units$adherence_end_m[i] && obs[i, m] && !event[i, m] && !censor[i, m] &&
           is.finite(Cden1[i, m]) && is.finite(Cden0[i, m]) &&
           is.finite(Cnum[i, m])) {
         nw1 <- nw1 * (1 - Cnum[i, m]) / (1 - Cden1[i, m])
@@ -313,7 +322,9 @@ g6_local_components <- function(d, cfg, common_init_num = NULL) {
   list(n = n, M = M, uid = uid, S = S, obs = obs, event = event,
        censor = censor, W1 = W1, W0 = W0, R1 = R1, R0 = R0,
        D1 = D1, D0 = D0, raw_W1 = raw_W1, raw_W0 = raw_W0,
-       Hden = Hden, Hnum = Hnum, initiation_fit = afit, censoring_fit = cfit,
+       Hden = Hden, Hnum = Hnum, adherence_end_m = units$adherence_end_m,
+       early_alive_discharge_untreated = units$early_alive_discharge_untreated,
+       initiation_fit = afit, censoring_fit = cfit,
        censoring_numerator_fit = cnfit)
 }
 
@@ -639,7 +650,8 @@ run_pneumonia_five_methods <- function(
     terms = terms,
     learners = resolved_learners,
     trunc = weight_truncation,
-    lag_initial = lag_initial
+    lag_initial = lag_initial,
+    discharge_rule = G6_DISCHARGE_RULE
   )
 
   if (verbose) {

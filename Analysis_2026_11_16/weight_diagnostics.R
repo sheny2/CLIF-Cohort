@@ -53,7 +53,7 @@ write_weight_diagnostics <- function(analysis,out,sensitive,step_hours) {
     clipped_percent=100*sum(risk&abs(raw-clipped)>1e-12)/sum(risk))
   }
   site <- d[.site==site_name]
-  decision <- site[.time<=analysis$config$tau & .time<=.S]
+  decision <- site[.time<=analysis$config$tau & .time<=.S & .time<=adherence_end_m]
   decision[,in_hospital:=decision_dttm<=discharge_dttm]
   risk_counts[[site_name]] <- decision[,.(rows=.N,patients=uniqueN(.uid),initiations=sum(.init)),
     by=.(site=.site,interval=.time,in_hospital)]

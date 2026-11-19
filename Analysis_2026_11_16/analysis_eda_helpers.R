@@ -4,13 +4,13 @@ write_covariate_eda <- function(long,cohort,out,tau,step_hours) {
  write <- function(x,f) fwrite(x,file.path(out,f),na="")
  # Full baseline cohort denominator: explicit death/discharge/admin censoring states.
  g <- cohort[,.(m=seq_len(112L)),by=.(hospital_block_id,site,index_dttm,
-             discharge_dttm,event_hours,event_type,delta,censor_hours)]
+             discharge_dttm,event_hours,event_type,delta,censor_hours,ordinary_alive_discharge)]
  g[,hours:=(m-1)*step_hours]
  g <- merge(g,long[,.(hospital_block_id,m,support_category)],by=c("hospital_block_id","m"),all.x=TRUE)
  g[, state := fcase(delta==1L & is.finite(event_hours)&event_hours<=hours & event_type=="in_hospital_death","In-hospital death",
    delta==1L & is.finite(event_hours)&event_hours<=hours & event_type=="hospice_discharge","Hospice discharge",
+   ordinary_alive_discharge & as.numeric(index_dttm)+hours*3600>=as.numeric(discharge_dttm),"Discharged alive",
    is.finite(censor_hours)&censor_hours<=hours,"Administratively censored",
-   as.numeric(index_dttm)+hours*3600>as.numeric(discharge_dttm),"Discharged alive",
    !is.na(support_category),support_category,default="Unknown")]
  # Other alive discharge is a resolved non-event for the selected block.
  # Death outside that block does not change this state; hospice is separate.
@@ -66,10 +66,10 @@ write_covariate_eda <- function(long,cohort,out,tau,step_hours) {
  write(g[!is.na(from_state),.(transitions=.N),by=.(site,from_state,to_state=as.character(state))],
        "respiratory_support_six_hour_transitions.csv")
  numeric_vars <- c("temperature","wbc","glucose","albumin","sf_ratio","nonresp_sofa_proxy")
- z <- melt(long,id.vars=c("hospital_block_id","site","m","S","decision_dttm","discharge_dttm"),
+ z <- melt(long,id.vars=c("hospital_block_id","site","m","S","decision_dttm","discharge_dttm","adherence_end_m"),
            measure.vars=numeric_vars,variable.name="variable",value.name="value")
  z[,`:=`(hours=(m-1)*step_hours,in_hospital=decision_dttm<=discharge_dttm,
-          decision_risk_set=m<=tau&m<=S)]
+          decision_risk_set=m<=tau&m<=S&m<=adherence_end_m)]
  q <- function(x,p)if(any(is.finite(x)))as.numeric(quantile(x[is.finite(x)],p,names=FALSE)) else NA_real_
  stats <- z[,.(rows=.N,observed=sum(is.finite(value)),missing=sum(!is.finite(value)),
    missing_percent=100*mean(!is.finite(value)),minimum=q(value,0),p01=q(value,.01),

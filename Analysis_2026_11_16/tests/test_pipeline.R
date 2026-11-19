@@ -16,6 +16,7 @@ patient <- sprintf("p%04d",seq_len(n));hospital <- sprintf("h%04d",seq_len(n))
 dead <- runif(n)<.23; deathhours <- sample(c(5,14,30,60,120,250,450,650),n,TRUE)
 dischargehours <- sample(5:16,n,TRUE)*24
 dischargehours[dead & seq_len(n)%%2==0] <- pmin(dischargehours[dead&seq_len(n)%%2==0],deathhours[dead&seq_len(n)%%2==0])
+dischargehours[c(7,8)] <- 12;dead[c(7,8)] <- FALSE
 write <- function(x,f)write_parquet(x,file.path(data,paste0("clif_",f,".parquet")))
 write(data.table(patient_id=patient,sex_category=sample(c("male","female"),n,TRUE),race_category="White",ethnicity_category="Not Hispanic",
  death_dttm=as.POSIXct(ifelse(dead,as.numeric(t0)+deathhours*3600,NA_real_),origin="1970-01-01",tz="UTC")),"patient")
@@ -66,6 +67,8 @@ group <- sample(c("early","late","never"),n,TRUE)
 init <- ifelse(group=="early",runif(n,.5,23),ifelse(group=="late",runif(n,30,150),800))
 med <- data.table(hospitalization_id=hospital,admin_dttm=t0+init*3600,med_group="steroid",med_category="hydrocortisone",
  med_route_category="iv",med_dose=50,med_dose_unit="mg",mar_action_category="given")
+med[7,mar_action_category:="not_given"]
+med[8,admin_dttm:=t0[8]+6*3600]
 write(med,"medication_admin_intermittent")
 Sys.setenv(TREATMENT_GRACE_HOURS=24,CLIF_DATA_CUTOFF_DATE="2026-10-31")
 run <- function(script,args) {
@@ -110,6 +113,17 @@ stopifnot(!any(grepl("support_score|paco2|^ph_|sf_ratio_model|sf_ratio_missing",
 states<-fread(file.path(eda,"respiratory_support_proportions_full_cohort.csv"))
 stopifnot(all(abs(states[,sum(proportion),by=.(site,hours)]$V1-1)<1e-10))
 diag<-readRDS(file.path(result,"sensitive","analysis","weight_diagnostics_patient_level.rds"))
+stopifnot(primary[patient_id=="p0007",early_alive_discharge_untreated],
+  !primary[patient_id=="p0008",early_alive_discharge_untreated])
+component <- diag$site_components[[primary[patient_id=="p0007",site]]]
+source(file.path(root,"06_generalized_five_methods.R"))
+prepared <- g6_prepare_data(as.data.frame(long),"site","hospital_block_id","m","event_m","censor_m","init_m",NULL,
+  diag$config$baseline,diag$config$tv,diag$config$horizon,diag$config$lag_initial)$data
+uid <- as.character(unique(prepared$.uid[prepared$patient_id=="p0007"]))
+i <- match(uid,component$uid)
+stopifnot(all(component$R1[i,]),all(component$R0[i,]),
+  all(component$raw_W1[i,2:112]==component$raw_W1[i,2]),
+  all(component$raw_W0[i,2:112]==component$raw_W0[i,2]))
 for(component in diag$site_components) {
  late<-which(component$S>diag$config$tau&component$S<=diag$config$horizon)
  for(i in late)stopifnot(component$R0[i,component$S[i]])
