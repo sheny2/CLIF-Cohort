@@ -1,0 +1,9 @@
+# Generated EHR outputs and local R session files are not source code.
+results/
+pipeline_output/
+sensitive/
+aggregate/
+.Rhistory
+.RData
+.Rproj.user/
+.DS_Store

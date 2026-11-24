@@ -1,0 +1,30 @@
+November 24 version: synthetic software validation only.
+
+PASS: full 01--08 synthetic pipeline at 3-, 6-, and 12-hour analysis intervals.
+Each interval was checked with 24-hour and 96-hour treatment grace periods,
+including local CCW/meta-analysis, six-method summaries, and site forests.
+PASS: saved interval dimensions, decision timestamps, event/treatment binning,
+EDA outcome totals, adherence-weight freezing, and later-initiation controls.
+PASS: independent reconstruction of local weighted curves and RMST in days;
+script 08 preserves script 07 results.
+PASS: timing validation at 1/2/3/4/6/8/12/24 hours; invalid timing rejected.
+PASS: bash preflight honors analysis-interval and encounter-gap overrides;
+invalid 5-hour intervals at 24-hour grace stop before cohort construction.
+PASS: existing hospital-block, outcome, adjacent-fill, S/F-pairing,
+steroid-action, early-alive-discharge, and local meta-analysis helper tests.
+PASS: all R files parse and command-file bash syntax is valid.
+PASS: Analysis_2026_11_16 has no Git changes; its source hashes are unchanged
+across final installation and verification.
+
+Run tests from this folder:
+  Rscript tests/test_analysis_timing.R
+  HOSPITAL_BLOCK_HOURS=3 Rscript tests/test_pipeline.R
+  HOSPITAL_BLOCK_HOURS=6 Rscript tests/test_pipeline.R
+  HOSPITAL_BLOCK_HOURS=12 Rscript tests/test_pipeline.R
+The integration test also runs script 08 at both grace periods.
+
+Only scripts 01--08 and their supporting code/tests are included.
+No NCO scripts or prior result datasets are copied.
+The descriptive raw-event timing histograms retain six-hour bins; the
+longitudinal analysis and covariate EDA use HOSPITAL_BLOCK_HOURS.
+Actual EHR estimates require running the pipeline on the data server.
